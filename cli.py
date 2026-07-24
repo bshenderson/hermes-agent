@@ -7921,7 +7921,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         # Context: always resolve via the provider-aware chain so Codex OAuth,
         # Copilot, and Nous-enforced caps win over the raw models.dev entry
-        # (e.g. gpt-5.5 is 1.05M on openai but 272K on Codex OAuth).
+        # (e.g. gpt-5.5 is 1.05M on openai but 256K on Codex OAuth).
         mi = result.model_info
         try:
             from hermes_cli.model_switch import resolve_display_context_length
@@ -8231,7 +8231,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         # Context: always resolve via the provider-aware chain so Codex OAuth,
         # Copilot, and Nous-enforced caps win over the raw models.dev entry
-        # (e.g. gpt-5.5 is 1.05M on openai but 272K on Codex OAuth).
+        # (e.g. gpt-5.5 is 1.05M on openai but 256K on Codex OAuth).
         mi = result.model_info
         from hermes_cli.model_switch import resolve_display_context_length
         ctx = resolve_display_context_length(

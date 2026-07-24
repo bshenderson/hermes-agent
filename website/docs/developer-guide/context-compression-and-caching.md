@@ -110,12 +110,12 @@ auxiliary:
 
 ### Codex gpt-5.5 threshold autoraise
 
-The ChatGPT Codex OAuth backend hard-caps gpt-5.5 at a **272K** context window
+The ChatGPT Codex OAuth backend hard-caps gpt-5.5 at a **256K** context window
 (the same slug exposes 1.05M on OpenAI's direct API and OpenRouter, and 400K on
-GitHub Copilot). At the default 50% trigger, compaction would fire at ~136K —
+GitHub Copilot). At the default 50% trigger, compaction would fire at ~128K —
 half the window the model can actually use. When the active route is Codex
 OAuth (`provider: openai-codex`) and the model is gpt-5.5, Hermes raises the
-trigger to **85%** (~231K) and shows a notice with the opt-out command. The
+trigger to **85%** (~223K) and shows a notice with the opt-out command. The
 notice is shown once per profile — a marker under `$HERMES_HOME`
 (`.codex_gpt55_autoraise_notice`) records that it ran, so repeated agent/session
 inits (e.g. every inbound gateway message) don't re-emit it; if the raised

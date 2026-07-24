@@ -82,9 +82,9 @@ def test_compression_threshold_default_none_for_other_models() -> None:
 # ---------------------------------------------------------------------------
 # Codex gpt-5.4 / gpt-5.5 compaction-threshold autoraise
 #
-# ChatGPT's Codex OAuth backend caps both families at a 272K window (verified
+# ChatGPT's Codex OAuth backend caps both families at a 256K window (verified
 # live via the Codex /models resolver and per-slug fallback table). The default
-# 50% compaction trigger would fire at ~136K — half the usable window — so this
+# 50% compaction trigger would fire at ~128K — half the usable window — so this
 # route raises the trigger to 85%. Only the Codex OAuth route is affected; the
 # same slugs on OpenAI direct / OpenRouter / Copilot expose a larger window and
 # keep the user's global threshold.
@@ -97,12 +97,12 @@ def test_compression_threshold_default_none_for_other_models() -> None:
         "gpt-5.5",
         "gpt-5.5-pro",
         "gpt-5.5-2026-04-23",  # dated snapshot
-        "gpt-5.5-codex-mini",  # Codex variant of the 5.5 family (also 272K-capped)
+        "gpt-5.5-codex-mini",  # Codex variant of the 5.5 family (also 256K-capped)
         "openai/gpt-5.5",  # aggregator-prefixed (still on the codex route)
         "GPT-5.5",  # case-insensitive
         "  gpt-5.5  ",  # whitespace tolerant
-        "gpt-5.4",  # base 5.4 (272K-capped)
-        "gpt-5.4-pro",  # pro 5.4 variant (272K-capped)
+        "gpt-5.4",  # base 5.4 (256K-capped)
+        "gpt-5.4-pro",  # pro 5.4 variant (256K-capped)
         "gpt-5.4-2026-01-01",  # dated 5.4 snapshot
         "openai/gpt-5.4",  # aggregator-prefixed 5.4
     ],
@@ -254,7 +254,7 @@ def test_compression_threshold_codex_spark_not_gated_by_gpt55_optout() -> None:
 # ── _resolve_compression_threshold (init_agent application logic) ────────────
 #
 # The Codex overrides are *autoraises*: they raise the trigger (0.85 for the
-# gpt-5.4/5.5 272K family, 0.70 for spark) but must never LOWER a higher
+# gpt-5.4/5.5 256K family, 0.70 for spark) but must never LOWER a higher
 # user-configured global threshold.
 
 

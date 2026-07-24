@@ -1582,7 +1582,7 @@ def test_run_conversation_compresses_mid_turn_before_output_budget_exhaustion(mo
 
     Initial preflight compression only sees the user's first message. A single
     turn can then grow by many tool results and leave almost no output budget
-    (the live 271k/272k GPT-5.5 failure). The agent should re-check request
+    (the live 255k/256k GPT-5.5 failure). The agent should re-check request
     pressure before every API call and compact before asking the model to
     produce the final answer.
     """

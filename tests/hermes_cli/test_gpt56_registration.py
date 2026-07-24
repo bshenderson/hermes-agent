@@ -84,7 +84,7 @@ class TestGpt56PricingRoute:
 
 
 class TestGpt56CodexCompaction:
-    """Codex OAuth caps the whole gpt-5.6 family at 272K, same as 5.4/5.5, so
+    """Codex OAuth caps the whole gpt-5.6 family at 256K, same as 5.4/5.5, so
     the compaction auto-raise (0.85) must fire for every 5.6 variant on the
     openai-codex route and NOT on the direct-API/OpenRouter routes."""
 
@@ -108,7 +108,7 @@ class TestGpt56CodexCompaction:
         from agent.auxiliary_client import _compression_threshold_for_model
 
         # Direct OpenAI API / OpenRouter expose the full 1.05M window, so the
-        # 272K-cap override must NOT apply there.
+        # 256K-cap override must NOT apply there.
         assert (
             _compression_threshold_for_model("gpt-5.6-sol", provider="openai")
             is None

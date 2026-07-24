@@ -3,7 +3,7 @@
 Bug (April 2026): `/model gpt-5.5` on openai-codex (ChatGPT OAuth) showed
 "Context: 1,050,000 tokens" because the display code used the raw models.dev
 ``ModelInfo.context_window`` (which reports the direct-OpenAI API value) instead
-of the provider-aware resolver. The agent was actually running at 272K — Codex
+of the provider-aware resolver. The agent was actually running at 256K — Codex
 OAuth's enforced cap — so the display was lying to the user.
 
 Fix: ``resolve_display_context_length()`` prefers
@@ -24,11 +24,11 @@ class _FakeModelInfo:
 
 class TestResolveDisplayContextLength:
     def test_codex_oauth_overrides_models_dev(self):
-        """gpt-5.5 on openai-codex must show Codex's 272K cap, not models.dev's 1.05M."""
+        """gpt-5.5 on openai-codex must show Codex's 256K cap, not models.dev's 1.05M."""
         fake_mi = _FakeModelInfo(1_050_000)  # what models.dev reports
         with patch(
             "agent.model_metadata.get_model_context_length",
-            return_value=272_000,  # what Codex OAuth actually enforces
+            return_value=262_144,  # what Codex OAuth actually enforces
         ):
             ctx = resolve_display_context_length(
                 "gpt-5.5",
@@ -37,8 +37,8 @@ class TestResolveDisplayContextLength:
                 api_key="",
                 model_info=fake_mi,
             )
-        assert ctx == 272_000, (
-            "Codex OAuth's 272K cap must win over models.dev's 1.05M for gpt-5.5"
+        assert ctx == 262_144, (
+            "Codex OAuth's 256K cap must win over models.dev's 1.05M for gpt-5.5"
         )
 
     def test_falls_back_to_model_info_when_resolver_returns_none(self):

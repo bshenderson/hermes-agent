@@ -83,6 +83,28 @@ def container_name(request) -> Iterator[str]:
 
 
 # ---------------------------------------------------------------------------
+# dockerfile_text fixture for contract tests
+# ---------------------------------------------------------------------------
+#
+# This fixture provides the Dockerfile text for contract tests that analyze
+# the Dockerfile without needing Docker to be available. Contract tests
+# verify build-time invariants (s6-overlay installation, checksums, etc.)
+# without requiring container execution.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def dockerfile_text() -> str:
+    """Return the Dockerfile text for contract tests."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    dockerfile = repo_root / "Dockerfile"
+    assert dockerfile.exists(), "Dockerfile not present in this checkout"
+    return dockerfile.read_text()
+
+
+# ---------------------------------------------------------------------------
 # docker_exec — default to the unprivileged hermes user
 # ---------------------------------------------------------------------------
 #

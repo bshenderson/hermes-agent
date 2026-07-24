@@ -1019,7 +1019,7 @@ def run_conversation(
         # Pre-API pressure check. The turn-prologue preflight only saw the
         # incoming user message; a single turn can then grow by many large
         # tool results and leave no output budget before the NEXT call (the
-        # live 271k/272k Codex failure). The post-response should_compress
+        # live 255k/256k Codex failure). The post-response should_compress
         # gate at the tool-loop tail uses API-reported last_prompt_tokens,
         # which LAGS a just-appended huge tool result — so it misses this
         # case. Re-check here against the current request estimate.

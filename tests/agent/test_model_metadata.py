@@ -357,7 +357,7 @@ class TestDefaultContextLengths:
 class TestCodexOAuthContextLength:
     """ChatGPT Codex OAuth imposes lower context limits than the direct
     OpenAI API for the same slugs. Verified Apr 2026 via live probe of
-    chatgpt.com/backend-api/codex/models: most models return 272k, while
+    chatgpt.com/backend-api/codex/models: most models return 256k, while
     models.dev reports 1.05M for gpt-5.5/gpt-5.4 and 400k for the rest.
     (Known exception: gpt-5.3-codex-spark is 128k.)
     """
@@ -369,19 +369,19 @@ class TestCodexOAuthContextLength:
 
     def test_fallback_table_used_without_token(self):
         """With no access token, the hardcoded Codex fallback table wins
-        over models.dev (which reports 1.05M for gpt-5.5 but Codex is 272k).
+        over models.dev (which reports 1.05M for gpt-5.5 but Codex is 256k).
         """
         from agent.model_metadata import get_model_context_length
 
         expected = {
-            "gpt-5.5": 272_000,
-            "gpt-5.4": 272_000,
-            "gpt-5.4-mini": 272_000,
-            "gpt-5.3-codex": 272_000,
+            "gpt-5.5": 262_144,
+            "gpt-5.4": 262_144,
+            "gpt-5.4-mini": 262_144,
+            "gpt-5.3-codex": 262_144,
             "gpt-5.3-codex-spark": 128_000,
-            "gpt-5.2-codex": 272_000,
-            "gpt-5.1-codex-max": 272_000,
-            "gpt-5.1-codex-mini": 272_000,
+            "gpt-5.2-codex": 262_144,
+            "gpt-5.1-codex-max": 262_144,
+            "gpt-5.1-codex-mini": 262_144,
         }
 
         with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
@@ -398,9 +398,11 @@ class TestCodexOAuthContextLength:
                     "(models.dev leakage?)"
                 )
 
-    def test_live_probe_overrides_fallback(self):
-        """When a token is provided, the live /models probe is preferred
-        and its context_window drives the result."""
+    def test_live_probe_is_clamped_to_known_usable_cap(self):
+        """When /models advertises a larger Codex window, clamp gpt-5.x
+        families to the known usable backend cap so compression triggers before
+        the real request limit.
+        """
         from agent.model_metadata import get_model_context_length
 
         fake_response = MagicMock()
@@ -427,12 +429,12 @@ class TestCodexOAuthContextLength:
                 api_key="fake-token",
                 provider="openai-codex",
             )
-        assert ctx_55 == 300_000
-        assert ctx_54 == 400_000
+        assert ctx_55 == 262_144
+        assert ctx_54 == 262_144
 
     def test_probe_failure_falls_back_to_hardcoded(self):
         """If the probe fails (non-200 / network error), we still return
-        the hardcoded 272k rather than leaking through to models.dev 1.05M."""
+        the hardcoded 256k rather than leaking through to models.dev 1.05M."""
         from agent.model_metadata import get_model_context_length
 
         fake_response = MagicMock()
@@ -448,17 +450,17 @@ class TestCodexOAuthContextLength:
                 api_key="expired-token",
                 provider="openai-codex",
             )
-        assert ctx == 272_000
+        assert ctx == 262_144
 
     def test_non_codex_providers_unaffected(self):
         """Resolving gpt-5.5 on non-Codex providers must NOT use the Codex
-        272k override — OpenRouter / direct OpenAI API have different limits.
+        256k override — OpenRouter / direct OpenAI API have different limits.
         """
         from agent.model_metadata import get_model_context_length
 
         # OpenRouter — should hit its own catalog path first; when mocked
         # empty, falls through to hardcoded DEFAULT_CONTEXT_LENGTHS (1.05M,
-        # matching the real direct-API value — Codex OAuth's 272k cap is
+        # matching the real direct-API value — Codex OAuth's 256k cap is
         # provider-specific and must not leak here).
         with patch("agent.model_metadata.fetch_model_metadata", return_value={}), \
              patch("agent.model_metadata.fetch_endpoint_model_metadata", return_value={}), \
@@ -471,7 +473,7 @@ class TestCodexOAuthContextLength:
                 provider="openrouter",
             )
         assert ctx == 1_050_000, (
-            f"Non-Codex gpt-5.5 resolved to {ctx}; Codex 272k override "
+            f"Non-Codex gpt-5.5 resolved to {ctx}; Codex 256k override "
             "leaked outside openai-codex provider"
         )
 
@@ -479,7 +481,7 @@ class TestCodexOAuthContextLength:
         """Pre-PR #14935 builds cached gpt-5.5 at 1.05M (from models.dev)
         before the Codex-aware branch existed. Upgrading users keep that
         stale entry on disk and the cache-first lookup returns it forever.
-        Codex OAuth caps at 272k for every slug, so any cached Codex
+        Codex OAuth caps at 256k for every slug, so any cached Codex
         entry >= 400k must be dropped and re-resolved via the live probe.
         """
         from agent import model_metadata as mm
@@ -500,7 +502,7 @@ class TestCodexOAuthContextLength:
         fake_response = MagicMock()
         fake_response.status_code = 200
         fake_response.json.return_value = {
-            "models": [{"slug": "gpt-5.5", "context_window": 272_000}]
+            "models": [{"slug": "gpt-5.5", "context_window": 262_144}]
         }
 
         with patch("agent.model_metadata.requests.get", return_value=fake_response), \
@@ -512,16 +514,16 @@ class TestCodexOAuthContextLength:
                 provider="openai-codex",
             )
 
-        assert ctx == 272_000, f"Stale entry should have been re-resolved to 272k, got {ctx}"
+        assert ctx == 262_144, f"Stale entry should have been re-resolved to 256k, got {ctx}"
         # Live save was called with the fresh value
-        mock_save.assert_called_with("gpt-5.5", base_url, 272_000)
+        mock_save.assert_called_with("gpt-5.5", base_url, 262_144)
         # The stale entry was removed from disk; unrelated entries survived
         remaining = _yaml.safe_load(cache_file.read_text()).get("context_lengths", {})
         assert stale_key not in remaining, "Stale entry was not invalidated from the cache file"
         assert remaining.get(other_key) == 128_000, "Unrelated cache entries must not be touched"
 
     def test_fresh_codex_cache_under_400k_is_respected(self, tmp_path, monkeypatch):
-        """Codex entries at the correct 272k must NOT be invalidated —
+        """Codex entries at the correct 256k must NOT be invalidated —
         only stale pre-fix values (>= 400k) get dropped."""
         from agent import model_metadata as mm
 
@@ -531,7 +533,7 @@ class TestCodexOAuthContextLength:
         base_url = "https://chatgpt.com/backend-api/codex/"
         import yaml as _yaml
         cache_file.write_text(_yaml.dump({"context_lengths": {
-            f"gpt-5.5@{base_url}": 272_000,
+            f"gpt-5.5@{base_url}": 262_144,
         }}))
 
         # If the invalidation incorrectly fired, this would be called; assert it isn't.
@@ -542,7 +544,7 @@ class TestCodexOAuthContextLength:
                 api_key="fake-token",
                 provider="openai-codex",
             )
-        assert ctx == 272_000
+        assert ctx == 262_144
         mock_get.assert_not_called()
 
     def test_stale_invalidation_scoped_to_codex_provider(self, tmp_path, monkeypatch):

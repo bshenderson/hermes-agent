@@ -1447,8 +1447,8 @@ DEFAULT_CONFIG = {
                                       # When True, gpt-5.4 / gpt-5.5 / gpt-5.6 on the
                                       # ChatGPT Codex OAuth route raise their compaction
                                       # trigger to 85% (vs the global `threshold` above).
-                                      # Codex hard-caps these families at a 272K window, so
-                                      # the default 50% would compact at ~136K and waste half
+                                      # Codex hard-caps these families at a 256K window, so
+                                      # the default 50% would compact at ~128K and waste half
                                       # the usable context. Set to False to opt back down to
                                       # the global threshold (e.g. 0.50) for those Codex
                                       # sessions. Only this exact route is affected —
