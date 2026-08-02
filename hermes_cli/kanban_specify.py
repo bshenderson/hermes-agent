@@ -114,19 +114,23 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
     if not raw:
         return None
     stripped = _FENCE_RE.sub("", raw.strip())
-    # Greedy: find the first `{` and last `}` and try that slice.
     first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
+    if first == -1:
         return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    # Try progressively shorter candidates: the model may output multiple
+    # JSON objects. Walk backward from the end and accept the first slice
+    # that parses as a single valid JSON object.
+    for last in range(len(stripped) - 1, first, -1):
+        if stripped[last] != "}":
+            continue
+        candidate = stripped[first : last + 1]
+        try:
+            val = json.loads(candidate)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(val, dict):
+            return val
+    return None
 
 
 def _profile_author() -> str:

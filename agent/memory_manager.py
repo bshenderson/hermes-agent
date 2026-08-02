@@ -36,6 +36,7 @@ from typing import Any, Callable, Dict, List, Optional
 from agent.memory_provider import MemoryProvider
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from tools.registry import tool_error
+from infra.hermes.memory_providers.hindsight import create_hindsight_provider
 
 logger = logging.getLogger(__name__)
 

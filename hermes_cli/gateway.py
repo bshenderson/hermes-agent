@@ -2842,7 +2842,7 @@ WantedBy=multi-user.target
 """
 
     hermes_home = str(get_hermes_home().resolve())
-    systemd_type, systemd_watchdog_directives = _systemd_watchdog_service_fields(
+    systemd_type, systemd_watchdog_service_fields = _systemd_watchdog_service_fields(
         hermes_home
     )
     profile_arg = _profile_arg(hermes_home)
@@ -2850,6 +2850,33 @@ WantedBy=multi-user.target
     path_entries.extend(_build_wsl_interop_paths(path_entries))
     path_entries.extend(common_bin_paths)
     sane_path = ":".join(path_entries)
+
+    # API server deployment env vars — read from the .env file if present,
+    # otherwise fall back to os.environ (which may be populated by a prior
+    # refresh cycle or by the operator's shell).
+    _api_env_path = Path.home() / ".config" / "systemd" / "user" / "hermes-gateway.env"
+    _api_env_vars = {}
+    if _api_env_path.exists():
+        for _line in _api_env_path.read_text().splitlines():
+            _line = _line.strip()
+            if "=" in _line and not _line.startswith("#"):
+                _k, _v = _line.split("=", 1)
+                _api_env_vars[_k.strip()] = _v.strip()
+    api_server_host = os.environ.get("API_SERVER_HOST") or _api_env_vars.get("API_SERVER_HOST", "")
+    api_server_port = os.environ.get("API_SERVER_PORT") or _api_env_vars.get("API_SERVER_PORT", "")
+    api_server_key = os.environ.get("API_SERVER_KEY") or _api_env_vars.get("API_SERVER_KEY", "")
+    api_server_cors = os.environ.get("API_SERVER_CORS_ORIGINS") or _api_env_vars.get("API_SERVER_CORS_ORIGINS", "")
+    env_lines = []
+    if api_server_host:
+        env_lines.append(f'Environment="API_SERVER_HOST={api_server_host}"')
+    if api_server_port:
+        env_lines.append(f'Environment="API_SERVER_PORT={api_server_port}"')
+    if api_server_key:
+        env_lines.append(f'Environment="API_SERVER_KEY={api_server_key}"')
+    if api_server_cors:
+        env_lines.append(f'Environment="API_SERVER_CORS_ORIGINS={api_server_cors}"')
+    env_block = "\n".join(env_lines) + "\n" if env_lines else ""
+
     return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -2858,12 +2885,12 @@ StartLimitIntervalSec=0
 
 [Service]
 Type={systemd_type}
-{systemd_watchdog_directives}ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run
+{systemd_watchdog_service_fields}ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run
 WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
-Restart=always
+{env_block}Restart=always
 RestartSec=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 RestartPreventExitStatus={GATEWAY_FATAL_CONFIG_EXIT_CODE}

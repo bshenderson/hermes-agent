@@ -101,6 +101,44 @@ def _declared_model_ids(value: Any) -> list[str]:
     return ids
 
 
+def _declared_model_labels(value: Any) -> dict[str, str]:
+    """Return picker display labels from configured per-model metadata."""
+    labels: dict[str, str] = {}
+
+    def _label_from_meta(meta: Any) -> str:
+        if not isinstance(meta, dict):
+            return ""
+        for key in ("display_name", "label", "name"):
+            candidate = meta.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    if isinstance(value, dict):
+        for model_id, meta in value.items():
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            label = _label_from_meta(meta)
+            if label:
+                labels[model_id.strip()] = label
+        return labels
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                model_id = item.get("model")
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            label = _label_from_meta(item)
+            if label:
+                labels[model_id.strip()] = label
+
+    return labels
+
+
 def _save_discovered_models_to_config(
     api_url: str, model_ids: list[str]
 ) -> None:
@@ -2265,6 +2303,8 @@ def list_authenticated_providers(
                 continue
             if ep_name.lower() in seen_slugs:
                 continue
+            if ep_name.lower() in _excluded:
+                continue
             display_name = ep_cfg.get("name", "") or ep_name
             api_url = (
                 ep_cfg.get("base_url", "")
@@ -2301,10 +2341,12 @@ def list_authenticated_providers(
             # Hermes writes ``models:`` as a dict keyed by model id, but older
             # or hand-edited configs may use strings or ``[{id: ...}]`` rows —
             # _declared_model_ids() owns that contract.
+            entry_model_spec = ep_cfg.get("models", [])
+            entry_model_labels = _declared_model_labels(entry_model_spec)
             entry_models: list = []
             if default_model:
                 entry_models.append(default_model)
-            for model_id in _declared_model_ids(ep_cfg.get("models", [])):
+            for model_id in _declared_model_ids(entry_model_spec):
                 if model_id not in entry_models:
                     entry_models.append(model_id)
 
@@ -2338,6 +2380,7 @@ def list_authenticated_providers(
                     "name": grp_display or display_name,
                     "api_url": api_url,
                     "models": [],
+                    "model_labels": {},
                     "ep_cfg": ep_cfg,  # used below for discover_models / api_key
                     "raw_names": [],
                 }
@@ -2345,6 +2388,7 @@ def list_authenticated_providers(
             for _m in entry_models:
                 if _m and _m not in ep_groups[group_key]["models"]:
                     ep_groups[group_key]["models"].append(_m)
+            ep_groups[group_key]["model_labels"].update(entry_model_labels)
             ep_groups[group_key]["raw_names"].append(display_name)
 
         for grp in ep_groups.values():
@@ -2353,6 +2397,7 @@ def list_authenticated_providers(
             display_name = grp["name"]
             api_url = grp["api_url"]
             models_list = list(grp["models"])
+            model_labels = dict(grp.get("model_labels") or {})
 
             # Official OpenAI API rows in providers: often have base_url but no
             # explicit models: dict — avoid a misleading zero count in /model.
@@ -2414,6 +2459,11 @@ def list_authenticated_providers(
                 "is_current": _ep_is_current,
                 "is_user_defined": True,
                 "models": models_list,
+                "model_labels": {
+                    model_id: label
+                    for model_id, label in model_labels.items()
+                    if model_id in models_list
+                },
                 "total_models": len(models_list) if models_list else 0,
                 "source": "user-config",
                 "api_url": api_url,
@@ -2514,6 +2564,9 @@ def list_authenticated_providers(
                 continue
 
             raw_name = (entry.get("name") or "").strip()
+            provider_key = str(entry.get("provider_key") or "").strip().lower()
+            if provider_key and provider_key in _excluded:
+                continue
             api_url = (
                 entry.get("base_url", "")
                 or entry.get("url", "")

@@ -147,17 +147,23 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
         return None
     stripped = _FENCE_RE.sub("", raw.strip())
     first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
+    if first == -1:
         return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    # Try progressively shorter candidates: the model may output multiple
+    # JSON objects (e.g. fanout=true followed by fanout=false).  Walk
+    # backward from the end and accept the first slice that parses as a
+    # single valid JSON object.
+    for last in range(len(stripped) - 1, first, -1):
+        if stripped[last] != "}":
+            continue
+        candidate = stripped[first : last + 1]
+        try:
+            val = json.loads(candidate)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(val, dict):
+            return val
+    return None
 
 
 def _profile_author() -> str:
@@ -336,6 +342,39 @@ def decompose_task(
         raw = resp.choices[0].message.content or ""
     except Exception:
         raw = ""
+
+    # Check if the model truncated output (finish_reason=length).
+    # If so, retry up to 2 times with a higher max_tokens ceiling.
+    finish_reason = None
+    if resp.choices:
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    retries = 0
+    max_retries = 2
+    parsed = None
+    while finish_reason == "length" and retries < max_retries:
+        retries += 1
+        logger.info(
+            "decompose: output truncated (finish_reason=length), retry %d/%d",
+            retries, max_retries,
+        )
+        try:
+            resp = call_llm(
+                task="kanban_decomposer",
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.3,
+                max_tokens=8000,
+                timeout=timeout or 180,
+            )
+            raw = resp.choices[0].message.content or ""
+            finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        except Exception as exc:
+            logger.info(
+                "decompose: retry %d API call failed (%s)", retries, exc,
+            )
+            break
 
     parsed = _extract_json_blob(raw)
     if parsed is None:

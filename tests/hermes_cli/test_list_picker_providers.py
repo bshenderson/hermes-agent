@@ -301,6 +301,50 @@ def test_current_custom_endpoint_passthrough_marks_current_row(monkeypatch):
     assert row["models"] == ["glm-5.1", "qwen3"]
 
 
+def test_user_config_model_display_names_survive_picker_rows(monkeypatch):
+    """Provider models metadata can carry human picker labels while values remain raw IDs."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("agent.models_dev.PROVIDER_TO_MODELS_DEV", {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models",
+                        lambda *a, **kw: [])
+
+    result = model_switch.list_picker_providers(
+        current_provider="custom:llamacpp-main",
+        current_base_url="http://127.0.0.1:8090/v1",
+        current_model="operator-default",
+        user_providers={
+            "llamacpp-main": {
+                "name": "llama.cpp Main",
+                "api": "http://127.0.0.1:8090/v1",
+                "transport": "chat_completions",
+                "default_model": "operator-default",
+                "discover_models": False,
+                "models": {
+                    "operator-default": {
+                        "display_name": "Qwen3.6 35B-A3B Q8 (operator default, main-chat)",
+                    },
+                    "qwen36-unsloth-35b-a3b-q6-256k": {
+                        "display_name": "Qwen3.6 35B-A3B Q6 (main-chat, 256K)",
+                    },
+                },
+            }
+        },
+        custom_providers=[],
+        max_models=50,
+    )
+
+    row = next(p for p in result if p["slug"] == "llamacpp-main")
+    assert row["models"] == [
+        "operator-default",
+        "qwen36-unsloth-35b-a3b-q6-256k",
+    ]
+    assert row["model_labels"] == {
+        "operator-default": "Qwen3.6 35B-A3B Q8 (operator default, main-chat)",
+        "qwen36-unsloth-35b-a3b-q6-256k": "Qwen3.6 35B-A3B Q6 (main-chat, 256K)",
+    }
+
+
 # ---------------------------------------------------------------------------
 # list_authenticated_providers: alias/canonical de-dup for Kimi (#49439)
 # ---------------------------------------------------------------------------

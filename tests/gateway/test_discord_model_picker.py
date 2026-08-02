@@ -117,6 +117,7 @@ def test_model_picker_model_labels_and_values_fit_discord_utf16_limit():
                 "slug": "emoji",
                 "name": "Emoji",
                 "models": [model_id],
+                "model_labels": {model_id: "Qwen3.6 35B-A3B Q6 (main-chat)"},
                 "total_models": 1,
                 "is_current": False,
             }
@@ -131,6 +132,8 @@ def test_model_picker_model_labels_and_values_fit_discord_utf16_limit():
     view._build_model_select("emoji")
     model_select = view.children[0]
     option = model_select.options[0]
+    assert option.label == "Qwen3.6 35B-A3B Q6 (main-chat)"
+    assert option.value.startswith("emoji/")
     assert utf16_len(option.label) <= 100
     assert utf16_len(option.value) <= 100
 
