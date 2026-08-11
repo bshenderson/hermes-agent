@@ -126,6 +126,48 @@ def _models_config_is_allowlist(value: Any) -> bool:
     return False
 
 
+def _declared_model_labels(value: Any) -> dict[str, str]:
+    """Return configured human labels keyed by model ID.
+
+    Mirrors ``_declared_model_ids`` input shapes while preserving optional
+    per-model presentation metadata from config.yaml. Picker surfaces still
+    switch by the stable model ID; this map only controls what humans see.
+    """
+    labels: dict[str, str] = {}
+
+    def _add(model_id: Any, metadata: Any) -> None:
+        if not isinstance(model_id, str):
+            return
+        model_id = model_id.strip()
+        if not model_id or not isinstance(metadata, dict):
+            return
+        label = (
+            metadata.get("display_name")
+            or metadata.get("label")
+            or metadata.get("name")
+            or ""
+        )
+        if isinstance(label, str) and label.strip():
+            labels[model_id] = label.strip()
+
+    if isinstance(value, dict):
+        for model_id, metadata in value.items():
+            _add(model_id, metadata)
+        return labels
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                model_id = item.get("model")
+            _add(model_id, item)
+        return labels
+
+    return labels
+
+
 def _save_discovered_models_to_config(
     api_url: str, model_ids: list[str]
 ) -> None:
@@ -2600,6 +2642,8 @@ def list_authenticated_providers(
             entry_extra_headers = _extra_headers_from_config(ep_cfg)
             headers_identity = tuple(sorted(entry_extra_headers.items()))
             group_key = (api_url_norm, credential_identity, api_mode, headers_identity)
+            if _declared_model_ids(ep_cfg.get("picker_models")):
+                group_key = (*group_key, str(ep_name).strip().lower())
 
             # ``default_model`` is the legacy key; ``model`` matches what
             # custom_providers entries use, so accept either.
@@ -2608,10 +2652,20 @@ def list_authenticated_providers(
             # Hermes writes ``models:`` as a dict keyed by model id, but older
             # or hand-edited configs may use strings or ``[{id: ...}]`` rows —
             # _declared_model_ids() owns that contract.
-            entry_models: list = []
-            if default_model:
-                entry_models.append(default_model)
-            entry_declared_models = _declared_model_ids(ep_cfg.get("models", []))
+            picker_model_spec = ep_cfg.get("picker_models")
+            picker_declared_models = _declared_model_ids(picker_model_spec)
+            picker_models_explicit = bool(picker_declared_models)
+            if picker_declared_models:
+                entry_models = list(picker_declared_models)
+                entry_declared_models = list(picker_declared_models)
+                entry_model_labels = _declared_model_labels(picker_model_spec)
+            else:
+                entry_models: list = []
+                if default_model:
+                    entry_models.append(default_model)
+                entry_model_spec = ep_cfg.get("models", [])
+                entry_declared_models = _declared_model_ids(entry_model_spec)
+                entry_model_labels = _declared_model_labels(entry_model_spec)
             for model_id in entry_declared_models:
                 if model_id not in entry_models:
                     entry_models.append(model_id)
@@ -2646,6 +2700,8 @@ def list_authenticated_providers(
                     "name": grp_display or display_name,
                     "api_url": api_url,
                     "models": [],
+                    "model_labels": {},
+                    "picker_models_explicit": picker_models_explicit,
                     "has_explicit_models": False,
                     "ep_cfg": ep_cfg,  # used below for discover_models / api_key
                     "raw_names": [],
@@ -2655,6 +2711,7 @@ def list_authenticated_providers(
             for _m in entry_models:
                 if _m and _m not in ep_groups[group_key]["models"]:
                     ep_groups[group_key]["models"].append(_m)
+            ep_groups[group_key]["model_labels"].update(entry_model_labels)
             # Track allowlist-shaped ``models:`` separately from the merged
             # list: a singular ``default_model``/``model`` is only the active
             # selection and must not suppress discovery (see #40542 / PR
@@ -2674,6 +2731,7 @@ def list_authenticated_providers(
             display_name = grp["name"]
             api_url = grp["api_url"]
             models_list = list(grp["models"])
+            model_labels = dict(grp.get("model_labels") or {})
 
             # Official OpenAI API rows in providers: often have base_url but no
             # explicit models: dict — avoid a misleading zero count in /model.
@@ -2720,8 +2778,12 @@ def list_authenticated_providers(
                     and _ep_url_norm == _current_base_url_norm
                 )
             )
-            should_probe = _can_probe_custom_provider(row_is_current=_ep_is_current) and bool(api_url) and discover and (
-                bool(api_key) or not has_explicit_models
+            should_probe = (
+                not bool(grp.get("picker_models_explicit"))
+                and _can_probe_custom_provider(row_is_current=_ep_is_current)
+                and bool(api_url)
+                and discover
+                and (bool(api_key) or not has_explicit_models)
             )
             if should_probe:
                 try:
@@ -2743,6 +2805,12 @@ def list_authenticated_providers(
                 "is_current": _ep_is_current,
                 "is_user_defined": True,
                 "models": models_list,
+                "model_labels": {
+                    model_id: model_labels[model_id]
+                    for model_id in models_list
+                    if model_id in model_labels
+                },
+                "picker_models_explicit": bool(grp.get("picker_models_explicit")),
                 "total_models": len(models_list) if models_list else 0,
                 "source": "user-config",
                 "api_url": api_url,
@@ -3105,6 +3173,8 @@ def list_authenticated_providers(
         for _row in results:
             if not _row.get("is_current"):
                 continue
+            if _row.get("picker_models_explicit"):
+                break
             _models = _row.get("models") or []
             if current_model not in _models:
                 _row["models"] = [current_model, *_models]

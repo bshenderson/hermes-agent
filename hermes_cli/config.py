@@ -1323,6 +1323,7 @@ def _normalize_custom_provider_entry(
         "provider",
         "name", "api", "url", "base_url", "api_key", "key_env", "api_key_env",
         "api_mode", "transport", "model", "default_model", "models",
+        "picker_models", "model_labels",
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models", "extra_body", "extra_headers",
@@ -1437,6 +1438,33 @@ def _normalize_custom_provider_entry(
             normalized_models[model_id.strip()] = model_meta
         if normalized_models:
             normalized["models"] = normalized_models
+
+    picker_models = entry.get("picker_models")
+    if isinstance(picker_models, dict) and picker_models:
+        normalized["picker_models"] = dict(picker_models)
+    elif isinstance(picker_models, list) and picker_models:
+        normalized_picker_models: Dict[str, Any] = {}
+        for item in picker_models:
+            if isinstance(item, str) and item.strip():
+                normalized_picker_models[item.strip()] = {}
+                continue
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                model_id = item.get("name")
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            model_meta = {
+                k: v for k, v in item.items() if k not in {"id", "name"}
+            }
+            normalized_picker_models[model_id.strip()] = model_meta
+        if normalized_picker_models:
+            normalized["picker_models"] = normalized_picker_models
+
+    model_labels = entry.get("model_labels")
+    if isinstance(model_labels, dict) and model_labels:
+        normalized["model_labels"] = dict(model_labels)
 
     context_length = entry.get("context_length")
     if isinstance(context_length, int) and context_length > 0:

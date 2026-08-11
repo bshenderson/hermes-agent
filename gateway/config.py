@@ -2082,11 +2082,16 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if hass_token:
         if Platform.HOMEASSISTANT not in config.platforms:
             config.platforms[Platform.HOMEASSISTANT] = PlatformConfig()
-        config.platforms[Platform.HOMEASSISTANT].enabled = True
-        config.platforms[Platform.HOMEASSISTANT].token = hass_token
+        homeassistant_config = config.platforms[Platform.HOMEASSISTANT]
+        homeassistant_explicit = bool(
+            homeassistant_config.extra.get("_enabled_explicit", False)
+        )
+        if not homeassistant_explicit or homeassistant_config.enabled:
+            homeassistant_config.enabled = True
+        homeassistant_config.token = hass_token
         hass_url = getenv("HASS_URL")
         if hass_url:
-            config.platforms[Platform.HOMEASSISTANT].extra["url"] = hass_url
+            homeassistant_config.extra["url"] = hass_url
 
     # Email
     email_addr = getenv("EMAIL_ADDRESS")
