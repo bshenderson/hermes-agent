@@ -287,3 +287,25 @@ class TestApiServerListenerGlobals:
         finally:
             ss.reset_secret_scope(token)
         assert not ss._is_global_env("API_SERVER_KEY")
+
+
+class TestSharedWebBackendGlobals:
+    """Self-hosted web backends are shared deployment infrastructure for
+    multiplexed API/Open WebUI turns, not per-profile user secrets."""
+
+    WEB_BACKEND_VARS = (
+        "FIRECRAWL_API_KEY",
+        "FIRECRAWL_API_URL",
+        "SEARXNG_URL",
+    )
+
+    def test_web_backend_vars_read_environ_even_when_scoped_multiplex(self, monkeypatch):
+        for name in self.WEB_BACKEND_VARS:
+            monkeypatch.setenv(name, f"container-{name.lower()}")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"OPENAI_API_KEY": "profile-key"})
+        try:
+            for name in self.WEB_BACKEND_VARS:
+                assert ss.get_secret(name) == f"container-{name.lower()}"
+        finally:
+            ss.reset_secret_scope(token)

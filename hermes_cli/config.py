@@ -2615,6 +2615,8 @@ def _env_expand_match(m: re.Match) -> str:
         val = os.environ.get(name)
         if val is not None:
             return val
+        if _env_var_is_configured_secret(name):
+            return raw
         logger.warning(
             "Config ref %r: %s is not set (check ~/.hermes/.env); "
             "keeping the literal placeholder", raw, name,
@@ -2634,6 +2636,33 @@ def _env_expand_match(m: re.Match) -> str:
         return raw
     # Legacy ``${VAR}`` — bare name.
     return os.environ.get(inner, raw)
+
+
+def _env_var_is_configured_secret(name: str) -> bool:
+    """Return whether *name* is declared as externally hydrated secret env.
+
+    ``load_config()`` can run before ``load_hermes_dotenv()`` has resolved
+    ``secrets.*.env`` entries into ``os.environ``. In that early-bootstrap
+    window, ``${env:NAME}`` should stay literal so a later reload can expand it,
+    but it should not warn as a missing ``~/.hermes/.env`` entry when the same
+    config already declares that an external source owns the variable.
+    """
+    if not name:
+        return False
+    try:
+        cfg = read_raw_config() or {}
+    except Exception:
+        return False
+    secrets = cfg.get("secrets")
+    if not isinstance(secrets, dict):
+        return False
+    for source_cfg in secrets.values():
+        if not isinstance(source_cfg, dict):
+            continue
+        env_map = source_cfg.get("env")
+        if isinstance(env_map, dict) and name in env_map:
+            return True
+    return False
 
 
 def _env_ref_var_name(ref: str) -> Optional[str]:

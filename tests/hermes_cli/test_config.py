@@ -85,6 +85,58 @@ class TestLoadConfigDefaults:
             assert config["agent"]["max_turns"] == 42
             assert "max_turns" not in config
 
+    def test_env_ref_declared_in_secret_source_does_not_warn_before_hydration(
+        self, tmp_path, caplog
+    ):
+        """Secret-source-owned env refs may expand after dotenv hydration.
+
+        Early config loads should keep the placeholder literal but not tell the
+        user to put the value in .env when ``secrets.*.env`` already owns it.
+        """
+        from hermes_cli import config as cfg_mod
+
+        cfg_mod._LOAD_CONFIG_CACHE.clear()
+        cfg_mod._RAW_CONFIG_CACHE.clear()
+        (tmp_path / "config.yaml").write_text(
+            "secrets:\n"
+            "  onepassword:\n"
+            "    enabled: true\n"
+            "    env:\n"
+            "      AGENTMAIL_API_KEY: op://homelab/agentmail.to-api/credential\n"
+            "mcp_servers:\n"
+            "  agentmail:\n"
+            "    headers:\n"
+            "      x-api-key: ${env:AGENTMAIL_API_KEY}\n",
+            encoding="utf-8",
+        )
+        caplog.set_level("WARNING", logger="hermes_cli.config")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=True):
+            loaded = load_config()
+
+        assert loaded["mcp_servers"]["agentmail"]["headers"]["x-api-key"] == "${env:AGENTMAIL_API_KEY}"
+        assert not any("AGENTMAIL_API_KEY is not set" in rec.message for rec in caplog.records)
+
+    def test_env_ref_warns_when_not_env_or_secret_source(self, tmp_path, caplog):
+        from hermes_cli import config as cfg_mod
+
+        cfg_mod._LOAD_CONFIG_CACHE.clear()
+        cfg_mod._RAW_CONFIG_CACHE.clear()
+        (tmp_path / "config.yaml").write_text(
+            "mcp_servers:\n"
+            "  example:\n"
+            "    headers:\n"
+            "      x-api-key: ${env:MISSING_API_KEY}\n",
+            encoding="utf-8",
+        )
+        caplog.set_level("WARNING", logger="hermes_cli.config")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=True):
+            loaded = load_config()
+
+        assert loaded["mcp_servers"]["example"]["headers"]["x-api-key"] == "${env:MISSING_API_KEY}"
+        assert any("MISSING_API_KEY is not set" in rec.message for rec in caplog.records)
+
 
 class TestLoadConfigParseFailure:
     """A YAML parse failure must NOT silently fall back to defaults.

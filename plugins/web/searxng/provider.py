@@ -18,17 +18,66 @@ Config keys this provider responds to::
 Env var::
 
     SEARXNG_URL=http://localhost:8080
+
+GXTD-341 / GXTD-400: news-category routing + structured citations/favicons.
+News queries are routed through SearXNG's ``categories=news`` first, with
+``time_range=day`` for time-sensitive terms. Results include source domain,
+citation strings, and Google favicon URLs for downstream rendering.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
 from typing import Any, Dict
 
 from agent.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
+
+_NEWS_QUERY_TERMS = (
+    "news",
+    "headline",
+    "headlines",
+    "current event",
+    "current events",
+    "today",
+    "latest",
+    "breaking",
+    "what happened",
+    "happening",
+)
+
+_FRESH_NEWS_QUERY_TERMS = (
+    "today",
+    "latest",
+    "breaking",
+    "headline",
+    "headlines",
+)
+
+
+def _is_news_query(query: str) -> bool:
+    normalized = " ".join((query or "").lower().split())
+    return any(term in normalized for term in _NEWS_QUERY_TERMS)
+
+
+def _is_fresh_news_query(query: str) -> bool:
+    normalized = " ".join((query or "").lower().split())
+    return any(term in normalized for term in _FRESH_NEWS_QUERY_TERMS)
+
+
+def _result_source(url: str) -> str:
+    parsed = urllib.parse.urlparse(url or "")
+    return (parsed.netloc or parsed.path).removeprefix("www.")
+
+
+def _google_favicon_url(url: str) -> str:
+    source = _result_source(url)
+    if not source:
+        return ""
+    return f"https://www.google.com/s2/favicons?domain={source}&sz=32"
 
 
 def _searxng_url() -> str:
@@ -79,14 +128,31 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             "pageno": 1,
         }
 
-        try:
+        def request(search_params: Dict[str, Any]) -> Dict[str, Any]:
             resp = httpx.get(
                 f"{base_url}/search",
-                params=params,
+                params=search_params,
                 timeout=15,
                 headers={"Accept": "application/json"},
             )
             resp.raise_for_status()
+            return resp.json()
+
+        category_used = "general"
+        try:
+            if _is_news_query(query):
+                news_params = dict(params)
+                news_params["categories"] = "news"
+                if _is_fresh_news_query(query):
+                    news_params["time_range"] = "day"
+                data = request(news_params)
+                raw_results = data.get("results", [])
+                category_used = "news_day" if news_params.get("time_range") == "day" else "news"
+                if raw_results:
+                    logger.info("SearXNG search '%s': used news category", query)
+            else:
+                data = request(params)
+                raw_results = data.get("results", [])
         except httpx.HTTPStatusError as exc:
             logger.warning("SearXNG HTTP error: %s", exc)
             return {
@@ -99,9 +165,6 @@ class SearXNGWebSearchProvider(WebSearchProvider):
                 "success": False,
                 "error": f"Could not reach SearXNG at {base_url}: {exc}",
             }
-
-        try:
-            data = resp.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning("SearXNG response parse error: %s", exc)
             return {
@@ -109,7 +172,15 @@ class SearXNGWebSearchProvider(WebSearchProvider):
                 "error": "Could not parse SearXNG response as JSON",
             }
 
-        raw_results = data.get("results", [])
+        if not raw_results and category_used.startswith("news"):
+            try:
+                data = request(params)
+                raw_results = data.get("results", [])
+                category_used = "general_fallback"
+                if raw_results:
+                    logger.info("SearXNG search '%s': fell back to general category", query)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SearXNG general fallback after news-category search failed: %s", exc)
 
         # SearXNG may return a score field; sort descending and cap to limit.
         sorted_results = sorted(
@@ -118,15 +189,40 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             reverse=True,
         )[:limit]
 
-        web_results = [
-            {
-                "title": str(r.get("title", "")),
-                "url": str(r.get("url", "")),
+        web_results = []
+        for i, r in enumerate(sorted_results):
+            title = str(r.get("title", ""))
+            url = str(r.get("url", ""))
+            source = _result_source(url)
+            position = i + 1
+            citation = f"[{position}] {title} — {url}" if title and url else url
+            favicon_url = _google_favicon_url(url)
+            item = {
+                "title": title,
+                "url": url,
                 "description": str(r.get("content", "")),
-                "position": i + 1,
+                "position": position,
+                "source": source,
+                "citation": citation,
             }
-            for i, r in enumerate(sorted_results)
-        ]
+            if favicon_url:
+                item["favicon_url"] = favicon_url
+                item["favicon_provider"] = "google"
+            web_results.append(item)
+
+        citations = []
+        for i, item in enumerate(web_results, start=1):
+            if item.get("url"):
+                citations.append(
+                    {
+                        "position": i,
+                        "title": item.get("title", ""),
+                        "url": item.get("url", ""),
+                        "source": item.get("source", ""),
+                        "favicon_url": item.get("favicon_url", ""),
+                        "favicon_provider": item.get("favicon_provider", ""),
+                    }
+                )
 
         logger.info(
             "SearXNG search '%s': %d results (from %d raw, limit %d)",
@@ -136,7 +232,33 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             limit,
         )
 
-        return {"success": True, "data": {"web": web_results}}
+        rendered_sources = "\n".join(
+            f"{entry['position']}. [{entry['source']}] {entry['title']} — {entry['url']} (favicon: {entry['favicon_url']})"
+            for entry in citations
+        )
+        source_block = (
+            "Use these sources in the final answer. Include citations like [1], [2], and include a Sources block.\n"
+            f"Search category: {category_used}\n"
+            f"Sources:\n{rendered_sources}"
+            if citations
+            else f"Search category: {category_used}\nSources: none"
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "web": web_results,
+                "sources": citations,
+                "citations": citations,
+                "source_block": source_block,
+                "search_category": category_used,
+                "display": {
+                    "requires_citations": True,
+                    "favicon_provider": "google",
+                    "source_block": source_block,
+                },
+            },
+        }
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {

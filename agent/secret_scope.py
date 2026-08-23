@@ -114,6 +114,11 @@ _GLOBAL_ENV_EXACT = frozenset({
     # profile-scoped.
     "API_SERVER_ENABLED", "API_SERVER_HOST", "API_SERVER_PORT",
     "API_SERVER_CORS_ORIGINS",
+    # Shared web backend infrastructure for multiplexed gateway turns. The
+    # gateway process already has these resolved from systemd/.env/secret
+    # helpers; profile-scoped API turns must not hide them behind the active
+    # profile's secret scope or Firecrawl/SearXNG disappear from OWUI.
+    "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "SEARXNG_URL",
 })
 _GLOBAL_ENV_PREFIXES = (
     "HERMES_KANBAN_",

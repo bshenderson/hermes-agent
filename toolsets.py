@@ -122,6 +122,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "handoff": {
+        "description": "First-class cross-profile handoff tools",
+        "tools": ["handoff"],
+        "includes": []
+    },
+
     "x_search": {
         "description": (
             "Search X (Twitter) posts and threads via xAI's built-in "
