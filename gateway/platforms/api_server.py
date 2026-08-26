@@ -5213,11 +5213,97 @@ class APIServerAdapter(BasePlatformAdapter):
                 if not tool_call_id or tool_call_id not in _started_tool_call_ids:
                     return
                 _started_tool_call_ids.discard(tool_call_id)
-                _stream_q.put_threadsafe(("__tool_progress__", {
+                payload = {
                     "tool": function_name,
                     "toolCallId": tool_call_id,
                     "status": "completed",
-                }))
+                }
+
+                # Media tools return the governed workload prompt_id/status_url
+                # and, for completed image jobs, the artifact manifest before
+                # the assistant's final text is available. Keep this projection
+                # deliberately bounded: it lets Open WebUI progress pipes poll
+                # or render the artifact as soon as the tool finishes without
+                # exposing arbitrary tool output in the SSE progress channel.
+                if function_name in {"media_generate", "media_artifact_get"}:
+                    try:
+                        parsed_result = json.loads(function_result) if isinstance(function_result, str) else function_result
+                    except Exception:
+                        parsed_result = None
+
+                    def _media_prompt_id(value):
+                        if isinstance(value, dict):
+                            prompt_id = value.get("prompt_id")
+                            if isinstance(prompt_id, str) and prompt_id:
+                                return prompt_id
+                            for key in ("result", "submission", "status", "job", "output", "content", "last_status"):
+                                found = _media_prompt_id(value.get(key))
+                                if found:
+                                    return found
+                        elif isinstance(value, list):
+                            for item in value:
+                                found = _media_prompt_id(item)
+                                if found:
+                                    return found
+                        return ""
+
+                    def _media_status_url(value):
+                        if isinstance(value, dict):
+                            status_url = value.get("status_url")
+                            if isinstance(status_url, str) and status_url:
+                                return status_url
+                            for key in ("result", "submission", "status", "job", "output", "content", "last_status"):
+                                found = _media_status_url(value.get(key))
+                                if found:
+                                    return found
+                        elif isinstance(value, list):
+                            for item in value:
+                                found = _media_status_url(item)
+                                if found:
+                                    return found
+                        return ""
+
+                    def _media_artifacts(value):
+                        if isinstance(value, dict):
+                            artifacts = value.get("media_artifacts")
+                            if isinstance(artifacts, list) and artifacts:
+                                return [artifact for artifact in artifacts if isinstance(artifact, dict)][:4]
+                            job = value.get("job")
+                            if isinstance(job, dict):
+                                job_artifacts = job.get("artifacts")
+                                if isinstance(job_artifacts, list) and job_artifacts:
+                                    return [artifact for artifact in job_artifacts if isinstance(artifact, dict)][:4]
+                            for key in ("result", "submission", "status", "output", "content", "last_status"):
+                                found = _media_artifacts(value.get(key))
+                                if found:
+                                    return found
+                        elif isinstance(value, list):
+                            for item in value:
+                                found = _media_artifacts(item)
+                                if found:
+                                    return found
+                        return []
+
+                    if isinstance(parsed_result, dict):
+                        media_result = {
+                            "success": parsed_result.get("success", True),
+                        }
+                        prompt_id = _media_prompt_id(parsed_result)
+                        status_url = _media_status_url(parsed_result)
+                        artifacts = _media_artifacts(parsed_result)
+                        if prompt_id:
+                            media_result["prompt_id"] = prompt_id
+                        if status_url:
+                            media_result["status_url"] = status_url
+                        if artifacts:
+                            media_result["media_artifacts"] = artifacts
+                        owui_media = parsed_result.get("owui_media")
+                        if isinstance(owui_media, dict):
+                            media_result["owui_media"] = owui_media
+                        if len(media_result) > 1:
+                            payload["result"] = media_result
+
+                _stream_q.put_threadsafe(("__tool_progress__", payload))
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
