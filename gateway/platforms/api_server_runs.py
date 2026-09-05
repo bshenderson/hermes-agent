@@ -20,6 +20,7 @@ except ImportError:
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
+from gateway.platforms.api_server_tool_results import bounded_tool_result_projection
 
 
 logger = logging.getLogger("gateway.platforms.api_server")
@@ -40,9 +41,16 @@ _USAGE_FIELDS = (
 # Tool-progress event -> SSE payload fields (tool_name, preview, kwargs); key order is wire format.
 _FIXED_EVENT_FIELDS = {
     "tool.started": lambda tool, preview, kw: {"tool": tool, "preview": preview},
-    "tool.completed": lambda tool, preview, kw: {
-        "tool": tool, "duration": round(kw.get("duration", 0), 3), "error": kw.get("is_error", False)},
+    "tool.completed": lambda tool, preview, kw: _tool_completed_event_fields(tool, kw),
     "reasoning.available": lambda tool, preview, kw: {"text": preview or ""}}
+
+
+def _tool_completed_event_fields(tool: str, kw: dict[str, Any]) -> dict[str, Any]:
+    payload = {"tool": tool, "duration": round(kw.get("duration", 0), 3), "error": kw.get("is_error", False)}
+    result_projection = bounded_tool_result_projection(tool, kw.get("result"))
+    if result_projection is not None:
+        payload["result"] = result_projection
+    return payload
 
 
 def _remember_room_retention(request: "web.Request", claims: dict[str, Any]) -> None:

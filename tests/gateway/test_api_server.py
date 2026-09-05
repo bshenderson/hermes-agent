@@ -39,6 +39,8 @@ from gateway.platforms.api_server import (
     cors_middleware,
     security_headers_middleware,
 )
+from gateway.platforms.api_server_tool_results import bounded_tool_result_projection
+from gateway.platforms.api_server_runs import _tool_completed_event_fields
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +78,92 @@ class TestRedactApiErrorText:
 
     def test_limit_truncates_after_redaction(self):
         assert len(_redact_api_error_text("x" * 500, limit=50)) == 50
+
+
+class TestBoundedToolResultProjection:
+    def test_ignores_non_media_tools(self):
+        assert bounded_tool_result_projection("web_search", {"status_url": "https://example.test"}) is None
+
+    def test_preserves_media_artifact_contract_without_prompt_body(self):
+        payload = {
+            "success": True,
+            "prompt_id": "prompt-123",
+            "status_url": "https://example.test/workloads/status/prompt-123?sig=signed",
+            "prompt": "do not forward user prompt text on public progress events",
+            "status": {
+                "media_artifacts": [{
+                    "artifact_id": "prompt-123:0",
+                    "filename": "image.png",
+                    "download_url": "https://example.test/workloads/artifact/prompt-123/0?download=1",
+                    "preview_url": "https://example.test/workloads/artifact/prompt-123/0",
+                    "inline_markdown": "![image.png](https://example.test/workloads/artifact/prompt-123/0)",
+                    "local_path": "/tmp/secret-local-path.png",
+                }],
+            },
+        }
+
+        result = bounded_tool_result_projection("media_generate", json.dumps(payload))
+
+        assert result is not None
+        assert result["success"] is True
+        assert result["prompt_id"] == "prompt-123"
+        assert result["status_url"].startswith("https://example.test/workloads/status/prompt-123")
+        artifact = result["status"]["media_artifacts"][0]
+        assert artifact["artifact_id"] == "prompt-123:0"
+        assert artifact["inline_markdown"].startswith("![image.png]")
+        assert "prompt" not in result
+        assert "local_path" not in artifact
+
+    def test_projection_stays_bounded_after_compaction(self):
+        payload = {
+            "success": True,
+            "prompt_id": "prompt-big",
+            "status_url": "https://example.test/workloads/status/prompt-big",
+            "status": {
+                "media_artifacts": [
+                    {
+                        "artifact_id": f"prompt-big:{i}",
+                        "filename": f"image-{i}.png",
+                        "download_url": "https://example.test/" + ("d" * 10_000),
+                        "inline_markdown": "![image](" + ("m" * 10_000) + ")",
+                    }
+                    for i in range(10)
+                ]
+            },
+        }
+
+        result = bounded_tool_result_projection("media_generate", payload)
+
+        assert result is not None
+        assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= 16_384
+        assert result["prompt_id"] == "prompt-big"
+
+    def test_run_event_completion_uses_same_bounded_projection(self):
+        result = _tool_completed_event_fields(
+            "media_artifact_get",
+            {
+                "duration": 1.2345,
+                "is_error": False,
+                "result": json.dumps({
+                    "success": True,
+                    "media_artifacts": [{
+                        "artifact_id": "a1",
+                        "filename": "image.png",
+                        "inline_markdown": "![image.png](https://example.test/a1)",
+                        "download_url": "https://example.test/a1?download=1",
+                        "local_path": "/tmp/nope.png",
+                    }],
+                    "prompt": "must not leak",
+                }),
+            },
+        )
+
+        assert result["tool"] == "media_artifact_get"
+        assert result["duration"] == 1.234
+        assert result["error"] is False
+        assert result["result"]["media_artifacts"][0]["artifact_id"] == "a1"
+        assert "prompt" not in result["result"]
+        assert "local_path" not in result["result"]["media_artifacts"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -1260,6 +1348,79 @@ class TestChatCompletionsEndpoint:
             assert len(pairs) == 2, f"expected 2 events (running+completed), got {pairs}"
             assert pairs[0] == ("running", "call_terminal_1"), pairs
             assert pairs[1] == ("completed", "call_terminal_1"), pairs
+
+    @pytest.mark.asyncio
+    async def test_stream_media_completion_includes_bounded_result_projection(self, adapter):
+        """Media metadata belongs on the broker/API event, not in Progress Pipe routing guts."""
+        import asyncio
+        import json as _json
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                ts_cb = kwargs.get("tool_start_callback")
+                tc_cb = kwargs.get("tool_complete_callback")
+                media_result = _json.dumps({
+                    "success": True,
+                    "prompt_id": "prompt-123",
+                    "status_url": "https://example.test/workloads/status/prompt-123?sig=signed",
+                    "prompt": "private prompt body must not be projected",
+                    "status": {
+                        "media_artifacts": [{
+                            "artifact_id": "prompt-123:0",
+                            "filename": "image.png",
+                            "download_url": "https://example.test/workloads/artifact/prompt-123/0?download=1",
+                            "inline_markdown": "![image.png](https://example.test/workloads/artifact/prompt-123/0)",
+                            "local_path": "/tmp/secret-local-image.png",
+                        }],
+                    },
+                })
+                if ts_cb:
+                    ts_cb("call_media_1", "media_generate", {"workflow_id": "gpu0-media-image"})
+                if tc_cb:
+                    tc_cb("call_media_1", "media_generate", {"workflow_id": "gpu0-media-image"}, media_result)
+                if cb:
+                    await asyncio.sleep(0.05)
+                    cb("done.")
+                return (
+                    {"final_response": "done.", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "make image"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+        completed = None
+        lines = body.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() != "event: hermes.tool.progress":
+                continue
+            for follow in lines[i + 1: i + 4]:
+                if follow.startswith("data: "):
+                    payload = _json.loads(follow[len("data: "):])
+                    if payload.get("status") == "completed":
+                        completed = payload
+                    break
+
+        assert completed is not None
+        assert completed["tool"] == "media_generate"
+        assert completed["toolCallId"] == "call_media_1"
+        assert completed["result"]["prompt_id"] == "prompt-123"
+        assert completed["result"]["status_url"].startswith("https://example.test/workloads/status/prompt-123")
+        artifact = completed["result"]["status"]["media_artifacts"][0]
+        assert artifact["inline_markdown"].startswith("![image.png]")
+        assert "prompt" not in completed["result"]
+        assert "local_path" not in artifact
 
     @pytest.mark.asyncio
     async def test_stream_tool_lifecycle_skips_internal_and_orphan_completes(self, adapter):

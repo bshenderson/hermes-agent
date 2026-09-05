@@ -15,6 +15,8 @@ import uuid
 from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
+from gateway.platforms.api_server_tool_results import bounded_tool_result_projection
+
 try:
     from aiohttp import web
 except ImportError:  # pragma: no cover - mirrors api_server's optional import
@@ -516,8 +518,11 @@ class OpenAICompatRoutesMixin:
                 if not tool_call_id or tool_call_id not in _started_tool_call_ids:
                     return
                 _started_tool_call_ids.discard(tool_call_id)
-                _stream_q.put_threadsafe(("__tool_progress__", {
-                    "tool": function_name, "toolCallId": tool_call_id, "status": "completed"}))
+                event_payload = {"tool": function_name, "toolCallId": tool_call_id, "status": "completed"}
+                result_projection = bounded_tool_result_projection(function_name, function_result)
+                if result_projection is not None:
+                    event_payload["result"] = result_projection
+                _stream_q.put_threadsafe(("__tool_progress__", event_payload))
 
             # tool_progress_callback deliberately NOT wired: it would duplicate the structured
             # start/complete callbacks (which carry the tool_call id).
