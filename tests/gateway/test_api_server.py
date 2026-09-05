@@ -138,6 +138,30 @@ class TestBoundedToolResultProjection:
         assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= 16_384
         assert result["prompt_id"] == "prompt-big"
 
+    def test_media_match_auto_submit_projection_preserves_status_handle(self):
+        payload = {
+            "success": True,
+            "auto_submitted_media_generate": True,
+            "media_generate_result": {
+                "success": True,
+                "submission": {
+                    "prompt_id": "prompt-auto",
+                    "status_url": "https://example.test/workloads/status/prompt-auto",
+                },
+            },
+            "media_generate_args": {"prompt": "must not leak"},
+            "prompt_provenance": {"original_prompt": "must not leak"},
+        }
+
+        result = bounded_tool_result_projection("media_match_workflow", payload)
+
+        assert result is not None
+        assert result["auto_submitted_media_generate"] is True
+        assert result["media_generate_result"]["submission"]["prompt_id"] == "prompt-auto"
+        assert result["media_generate_result"]["submission"]["status_url"].endswith("/prompt-auto")
+        assert "media_generate_args" not in result
+        assert "prompt_provenance" not in result
+
     def test_run_event_completion_uses_same_bounded_projection(self):
         result = _tool_completed_event_fields(
             "media_artifact_get",

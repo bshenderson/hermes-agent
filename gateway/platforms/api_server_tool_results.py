@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-_MEDIA_RESULT_TOOL_NAMES = frozenset({"media_generate", "media_artifact_get"})
+_MEDIA_RESULT_TOOL_NAMES = frozenset({"media_match_workflow", "media_generate", "media_artifact_get"})
 _MEDIA_RESULT_MAX_BYTES = 16_384
 _MEDIA_RESULT_MAX_DEPTH = 5
 _MEDIA_RESULT_MAX_LIST_ITEMS = 5
@@ -31,6 +31,8 @@ _MEDIA_ROOT_KEYS = frozenset({
     "download_url",
     "preview_url",
     "inline_markdown",
+    "auto_submitted_media_generate",
+    "media_generate_result",
     "owui_media",
 })
 _MEDIA_NESTED_KEYS = _MEDIA_ROOT_KEYS | frozenset({
@@ -52,6 +54,7 @@ _MEDIA_COMPACT_KEYS = (
     "status_url",
     "media_artifacts",
     "artifacts",
+    "media_generate_result",
     "submission",
     "status",
     "job",
