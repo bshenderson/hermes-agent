@@ -1266,7 +1266,8 @@ class AIAgent(
         return bool(getattr(self, "_stall_guards", True))
 
     def _guardrail_block_result(self, decision: ToolGuardrailDecision) -> str:
-        self._set_tool_guardrail_halt(decision)
+        if decision.should_halt:
+            self._set_tool_guardrail_halt(decision)
         return toolguard_synthetic_result(decision)
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:

@@ -79,6 +79,11 @@ def is_stall_guard_repeatable(tool_name: str) -> bool:
     """Whether a tool is exempt from the identical-call loop notice."""
     return tool_name in STALL_GUARD_REPEATABLE_TOOLS or tool_name.endswith(_STALL_GUARD_REPEATABLE_SUFFIXES)
 
+# Successful web tools produce fresh evidence. The repeated-search failure mode
+# that prompted this guard often uses distinct queries, so exact-args duplicate
+# detection never fires. A soft synthesis hint after a few landed web evidence
+# results catches that drift without blocking legitimate targeted follow-up.
+WEB_EVIDENCE_TOOL_NAMES = frozenset({"web_search", "web_extract"})
 
 def _is_non_interactive_platform(platform: str | None) -> bool:
     """True for gateway/cron sessions where tool loops are unattended."""
@@ -100,7 +105,11 @@ class LoopCapConfig:
         """Build config from the ``tool_loop_guardrails.loop_caps`` section."""
         if not isinstance(data, Mapping):
             return cls()
-        return cls(**{f.name: _int_at_least(data.get(f.name), f.default, 0) for f in fields(cls)})
+        defaults = cls()
+        values: dict[str, int] = {}
+        for f in fields(cls):
+            values[f.name] = _int_at_least(data.get(f.name), getattr(defaults, f.name), 0)
+        return cls(**values)
 
 
 @dataclass(frozen=True)
@@ -117,6 +126,8 @@ class ToolCallGuardrailConfig:
     same_tool_failure_halt_after: int = 8
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
+    web_evidence_synthesis_hint_after: int = 4
+    web_search_synthesis_redirect_after: int = 4
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
     loop_caps: LoopCapConfig = field(default_factory=LoopCapConfig)
@@ -137,8 +148,21 @@ class ToolCallGuardrailConfig:
             section = data.get(section_name)
             nested = section.get(key, data.get(name)) if isinstance(section, Mapping) else data.get(name)
             return _int_at_least(nested, getattr(d, name), 1)
+        synthesis_hints = data.get("synthesis_hints")
+        if not isinstance(synthesis_hints, Mapping):
+            synthesis_hints = {}
 
-        thresholds = {name: threshold(name, *src) for name, src in _THRESHOLD_SOURCES.items()}
+        thresholds: dict[str, int] = {name: threshold(name, *src) for name, src in _THRESHOLD_SOURCES.items()}
+        thresholds["web_evidence_synthesis_hint_after"] = _int_at_least(
+            synthesis_hints.get("web_evidence_after", data.get("web_evidence_synthesis_hint_after")),
+            getattr(d, "web_evidence_synthesis_hint_after"),
+            0,
+        )
+        thresholds["web_search_synthesis_redirect_after"] = _int_at_least(
+            synthesis_hints.get("web_search_redirect_after", data.get("web_search_synthesis_redirect_after")),
+            getattr(d, "web_search_synthesis_redirect_after"),
+            0,
+        )
         return cls(loop_caps=LoopCapConfig.from_mapping(data.get("loop_caps")), **flags, **thresholds)
 
 
@@ -302,6 +326,7 @@ class ToolCallGuardrailController:
         self._persisted_result_paths: dict[str, str] = {}
         self._turn_web_search_count = 0
         self._turn_subagent_count = 0
+        self._web_evidence_success_count = 0
 
     @property
     def halt_decision(self) -> ToolGuardrailDecision | None:
@@ -326,8 +351,13 @@ class ToolCallGuardrailController:
 
         # Loop caps apply regardless of hard_stop_enabled (which only governs the detector).
         cap_block = self._check_loop_cap(tool_name, args, signature)
-        if cap_block is not None or not self.config.hard_stop_enabled:
-            return cap_block or allow
+        if cap_block is not None:
+            return cap_block
+        synthesis_redirect = self._check_web_search_synthesis_redirect(tool_name, signature)
+        if synthesis_redirect is not None:
+            return synthesis_redirect
+        if not self.config.hard_stop_enabled:
+            return allow
         # A mutation since this call last failed makes the retry a new experiment.
         exact_count = 0 if self._progress_since_failure.get(signature) else self._exact_failure_counts.get(signature, 0)
         if exact_count >= self.config.exact_failure_block_after:
@@ -385,6 +415,10 @@ class ToolCallGuardrailController:
         if tool_name in PROGRESS_RESET_TOOL_NAMES or file_mutation_result_landed(tool_name, result):
             self._progress_since_failure.update(dict.fromkeys(self._exact_failure_counts, True))
             self._same_tool_failure_counts.clear()
+
+        synthesis_hint = self._record_web_evidence_success(tool_name, signature)
+        if synthesis_hint is not None:
+            return synthesis_hint
         if not self._is_idempotent(tool_name):
             self._no_progress.pop(signature, None)
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
@@ -396,6 +430,61 @@ class ToolCallGuardrailController:
         if warnings and repeat_count >= self.config.no_progress_warn_after:
             return self._decide("warn", "idempotent_no_progress_warning", tool_name, repeat_count, signature)
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
+
+    def _record_web_evidence_success(
+        self,
+        tool_name: str,
+        signature: ToolCallSignature,
+    ) -> ToolGuardrailDecision | None:
+        if tool_name not in WEB_EVIDENCE_TOOL_NAMES:
+            return None
+        threshold = self.config.web_evidence_synthesis_hint_after
+        if not threshold:
+            return None
+        self._web_evidence_success_count += 1
+        count = self._web_evidence_success_count
+        if not self.config.warnings_enabled or count < threshold or count % threshold != 0:
+            return None
+        return ToolGuardrailDecision(
+            action="warn",
+            code="web_evidence_synthesis_hint",
+            message=(
+                f"This turn has already gathered {count} fresh web evidence results. "
+                "If these results answer the user's request, synthesize now with "
+                "the available sources instead of continuing broad search. Only "
+                "call more web tools for a specific missing fact."
+            ),
+            tool_name=tool_name,
+            count=count,
+            signature=signature,
+        )
+
+    def _check_web_search_synthesis_redirect(
+        self,
+        tool_name: str,
+        signature: ToolCallSignature,
+    ) -> ToolGuardrailDecision | None:
+        if tool_name != "web_search":
+            return None
+        threshold = self.config.web_search_synthesis_redirect_after
+        if self._same_tool_failure_counts.get(tool_name, 0):
+            return None
+        if not threshold or self._turn_web_search_count <= threshold:
+            return None
+        count = self._turn_web_search_count
+        return ToolGuardrailDecision(
+            action="redirect",
+            code="web_search_synthesis_redirect",
+            message=(
+                f"Skipped web_search: this turn already requested {count} web_search "
+                "calls. Stop broad searching. Use the search results already in the "
+                "transcript, call web_extract only for one specific source if full "
+                "text is essential, otherwise answer the user now."
+            ),
+            tool_name=tool_name,
+            count=count,
+            signature=signature,
+        )
 
     def _is_idempotent(self, tool_name: str) -> bool:
         return tool_name not in self.config.mutating_tools and tool_name in self.config.idempotent_tools

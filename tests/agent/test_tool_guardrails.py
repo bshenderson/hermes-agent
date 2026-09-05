@@ -62,6 +62,10 @@ def test_config_parses_nested_warn_and_hard_stop_thresholds():
                 "same_tool_failure": 7,
                 "idempotent_no_progress": 8,
             },
+            "synthesis_hints": {
+                "web_evidence_after": 9,
+                "web_search_redirect_after": 10,
+            },
         }
     )
 
@@ -73,6 +77,8 @@ def test_config_parses_nested_warn_and_hard_stop_thresholds():
     assert cfg.exact_failure_block_after == 6
     assert cfg.same_tool_failure_halt_after == 7
     assert cfg.no_progress_block_after == 8
+    assert cfg.web_evidence_synthesis_hint_after == 9
+    assert cfg.web_search_synthesis_redirect_after == 10
 
 
 def test_gateway_platform_defaults_to_hard_stop_without_changing_interactive_defaults():
@@ -242,6 +248,67 @@ def test_identical_call_streak_never_halts_when_hard_stop_disabled_or_for_poller
     for i in range(6):
         hard.observe_call("terminal", {"command": "date"}, f"t{i}", failed=False)
     assert hard.halt_decision is None
+
+
+def test_successful_web_evidence_warns_to_synthesize_after_threshold():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(web_evidence_synthesis_hint_after=4)
+    )
+
+    decisions = []
+    for i, tool_name in enumerate(["web_search", "web_extract", "web_search", "web_extract"]):
+        assert controller.before_call(tool_name, {"query": f"q{i}"}).action == "allow"
+        decisions.append(
+            controller.after_call(tool_name, {"query": f"q{i}"}, f'{{"result": "r{i}"}}', failed=False)
+        )
+
+    assert [decision.action for decision in decisions[:3]] == ["allow", "allow", "allow"]
+    assert decisions[3].action == "warn"
+    assert decisions[3].code == "web_evidence_synthesis_hint"
+    assert decisions[3].count == 4
+    assert "synthesize now" in decisions[3].message
+
+
+def test_web_evidence_synthesis_hint_is_configurable_and_resets_per_turn():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig.from_mapping(
+            {"synthesis_hints": {"web_evidence_after": 0, "web_search_redirect_after": 0}}
+        )
+    )
+    for i in range(5):
+        assert controller.before_call("web_search", {"query": f"q{i}"}).action == "allow"
+        assert controller.after_call("web_search", {"query": f"q{i}"}, "ok", failed=False).action == "allow"
+
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(web_evidence_synthesis_hint_after=2)
+    )
+    assert controller.after_call("web_search", {"query": "q1"}, "ok", failed=False).action == "allow"
+    assert controller.after_call("web_search", {"query": "q2"}, "ok", failed=False).code == "web_evidence_synthesis_hint"
+    controller.reset_for_turn()
+    assert controller.after_call("web_search", {"query": "q3"}, "ok", failed=False).action == "allow"
+
+
+def test_web_search_redirect_skips_more_search_after_request_threshold_without_halt():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            web_evidence_synthesis_hint_after=0,
+            web_search_synthesis_redirect_after=2,
+        )
+    )
+
+    for i in range(2):
+        assert controller.before_call("web_search", {"query": f"q{i}"}).action == "allow"
+        assert controller.after_call("web_search", {"query": f"q{i}"}, "ok", failed=False).action == "allow"
+
+    redirect = controller.before_call("web_search", {"query": "q3"})
+    assert redirect.action == "redirect"
+    assert redirect.code == "web_search_synthesis_redirect"
+    assert redirect.should_halt is False
+    assert controller.halt_decision is None
+
+    # Full-text fetches stay available after the search redirect; they often
+    # are the right next move once enough candidate sources have been found.
+    assert controller.before_call("web_extract", {"urls": ["https://example.test"]}).action == "allow"
 
 
 
