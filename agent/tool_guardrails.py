@@ -305,6 +305,11 @@ class ToolCallGuardrailController:
         self.reset_for_turn()
 
     def reset_for_turn(self) -> None:
+        # GXTD-572: cross-turn no-progress state is deliberately NOT reset. Long
+        # operator sessions can loop across turns with varied read/search args;
+        # a per-turn counter misses that bloat.
+        if not hasattr(self, "_cross_turn_no_progress"):
+            self._cross_turn_no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
         # signature -> a mutating call succeeded since its last failure
@@ -365,6 +370,9 @@ class ToolCallGuardrailController:
         record = self._no_progress.get(signature) if self._is_idempotent(tool_name) else None
         if record is not None and record[1] >= self.config.no_progress_block_after:
             return self._decide("block", "idempotent_no_progress_block", tool_name, record[1], signature)
+        cross_record = getattr(self, "_cross_turn_no_progress", {}).get(signature)
+        if cross_record is not None and cross_record[1] >= self.config.no_progress_block_after:
+            return self._decide("block", "idempotent_no_progress_block", tool_name, cross_record[1], signature)
         return allow
 
     def after_call(
@@ -415,6 +423,7 @@ class ToolCallGuardrailController:
         if tool_name in PROGRESS_RESET_TOOL_NAMES or file_mutation_result_landed(tool_name, result):
             self._progress_since_failure.update(dict.fromkeys(self._exact_failure_counts, True))
             self._same_tool_failure_counts.clear()
+            self._cross_turn_no_progress.clear()
 
         synthesis_hint = self._record_web_evidence_success(tool_name, signature)
         if synthesis_hint is not None:
@@ -427,9 +436,14 @@ class ToolCallGuardrailController:
         previous = self._no_progress.get(signature)
         repeat_count = previous[1] + 1 if previous is not None and previous[0] == result_hash else 1
         self._no_progress[signature] = (result_hash, repeat_count)
-        if warnings and repeat_count >= self.config.no_progress_warn_after:
-            return self._decide("warn", "idempotent_no_progress_warning", tool_name, repeat_count, signature)
-        return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
+
+        cross_previous = self._cross_turn_no_progress.get(signature)
+        cross_count = cross_previous[1] + 1 if cross_previous is not None and cross_previous[0] == result_hash else 1
+        self._cross_turn_no_progress[signature] = (result_hash, cross_count)
+        effective_repeat_count = max(repeat_count, cross_count)
+        if warnings and effective_repeat_count >= self.config.no_progress_warn_after:
+            return self._decide("warn", "idempotent_no_progress_warning", tool_name, effective_repeat_count, signature)
+        return ToolGuardrailDecision(tool_name=tool_name, count=effective_repeat_count, signature=signature)
 
     def _record_web_evidence_success(
         self,

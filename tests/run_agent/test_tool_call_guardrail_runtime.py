@@ -405,6 +405,32 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
 
 
+def test_cross_turn_idempotent_no_progress_warning_and_block_survive_turn_reset():
+    """GXTD-572: read/search-style loops can vary args across turns and still
+    return the same result.  The no-progress guard should not be blind to that
+    just because a new turn resets per-turn counters, but it should stay soft
+    enough that real mutations clear the state."""
+    agent = _make_agent("read_file", config=_hard_stop_config())
+    args = {"path": "/same/file.txt"}
+    result = json.dumps({"content": "same content"})
+
+    for turn in range(1, 6):
+        agent._tool_guardrails.reset_for_turn()
+        decision = agent._tool_guardrails.after_call("read_file", args, result, failed=False)
+        if turn == 3:
+            assert decision.action == "warn"
+            assert decision.code == "idempotent_no_progress_warning"
+
+    agent._tool_guardrails.reset_for_turn()
+    blocked = agent._tool_guardrails.before_call("read_file", args)
+    assert blocked.action == "block"
+    assert blocked.code == "idempotent_no_progress_block"
+
+    agent._tool_guardrails.after_call("write_file", {"path": "/same/file.txt"}, json.dumps({"success": True}), failed=False)
+    cleared = agent._tool_guardrails.before_call("read_file", args)
+    assert cleared.action == "allow"
+
+
 def test_web_search_synthesis_redirect_ends_turn_instead_of_looping():
     """A redirect decision is a stop condition, not just another synthetic tool
     result.  Qwen-family local models can keep requesting fresh broad searches
