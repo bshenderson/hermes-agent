@@ -576,6 +576,12 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
         enabled_toolsets = _composite_toolsets(toolset_names, platform, explicitly_configured)
 
     _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
+    # Kanban is deliberately available to dispatcher-owned workers via model_tools
+    # when HERMES_KANBAN_TASK is set. Do not recover its large lifecycle schema
+    # into ordinary explicitly-configured sessions that omitted the toolset; that
+    # turns lightweight chat profiles into 20k+ token tool prompts.
+    if explicitly_configured and "kanban" not in toolset_names and not os.environ.get("HERMES_KANBAN_TASK"):
+        enabled_toolsets.discard("kanban")
     if plugin_ts_keys:
         enabled_toolsets |= _enabled_plugin_toolsets(config, platform, toolset_names, plugin_ts_keys)
 

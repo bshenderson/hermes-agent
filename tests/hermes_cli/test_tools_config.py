@@ -106,6 +106,22 @@ def test_scalar_platform_toolsets_fall_back_to_platform_default():
 
 
 
+def test_explicit_cli_toolsets_do_not_recover_kanban_without_dispatch_env(monkeypatch):
+    """Explicit ordinary sessions that omit kanban must not regain its large tool surface.
+
+    Dispatcher-owned workers still receive kanban lifecycle tools through model_tools
+    when HERMES_KANBAN_TASK is set; recovering it here bloats normal chat prompts.
+    """
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    config = {"platform_toolsets": {"cli": ["web", "todo"]}}
+
+    enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+
+    assert "web" in enabled
+    assert "todo" in enabled
+    assert "kanban" not in enabled
+
+
 def test_get_platform_tools_homeassistant_toolset_enabled_for_cron_when_hass_token_set(monkeypatch):
     """HA toolset is runtime-gated by check_fn (requires HASS_TOKEN).
 
