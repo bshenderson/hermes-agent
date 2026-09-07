@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from run_agent import AIAgent
+from agent.tool_guardrails import classify_tool_failure
 
 
 def _make_tool_defs(*names: str) -> list[dict]:
@@ -460,6 +461,50 @@ def test_web_search_synthesis_redirect_ends_turn_instead_of_looping():
     assert result["guardrail"]["code"] == "web_search_synthesis_redirect"
     assert "stopped retrying" in result["final_response"]
 
+
+def test_execute_code_semantic_http_error_counts_as_tool_failure():
+    result = json.dumps({
+        "status": "success",
+        "output": "Query failed: HTTP Error 404: Not Found\n",
+        "exit_code": 0,
+    })
+
+    failed, suffix = classify_tool_failure("execute_code", result)
+
+    assert failed is True
+    assert suffix == " [error]"
+
+
+def test_execute_code_loop_cap_blocks_after_bounded_calls():
+    agent = _make_agent("execute_code")
+    args = {"code": "print('Query failed: HTTP Error 404')"}
+
+    for _ in range(8):
+        decision = agent._tool_guardrails.before_call("execute_code", args)
+        assert decision.action == "allow"
+        agent._tool_guardrails.after_call(
+            "execute_code",
+            args,
+            json.dumps({"status": "success", "output": "Query failed: HTTP Error 404", "exit_code": 0}),
+        )
+
+    blocked = agent._tool_guardrails.before_call("execute_code", args)
+
+    assert blocked.action == "block"
+    assert blocked.code == "loop_execute_code_cap"
+
+
+def test_execute_code_semantic_failure_gets_repeated_failure_warning():
+    agent = _make_agent("execute_code")
+    args = {"code": "print('Query failed: HTTP Error 404')"}
+    result = json.dumps({"status": "success", "output": "Query failed: HTTP Error 404", "exit_code": 0})
+
+    first = agent._tool_guardrails.after_call("execute_code", args, result)
+    second = agent._tool_guardrails.after_call("execute_code", args, result)
+
+    assert first.action == "allow"
+    assert second.action == "warn"
+    assert second.code == "repeated_exact_failure_warning"
 
 
 

@@ -69,6 +69,7 @@ _THRESHOLD_SOURCES: dict[str, tuple[str, str]] = {
 # Per-turn caps on runaway-prone tools (counters reset in reset_for_turn).
 _DEFAULT_MAX_WEB_SEARCHES_PER_TURN = 50
 _DEFAULT_MAX_SUBAGENTS_PER_TURN = 50
+_DEFAULT_MAX_EXECUTE_CODE_CALLS_PER_TURN = 8
 
 # Interactive surfaces plus bounded supervised task loops (subagent stopped by its parent;
 # api_server has a live client) doing real edit -> re-run work keep the warn-only default.
@@ -99,6 +100,7 @@ class LoopCapConfig:
 
     max_web_searches: int = _DEFAULT_MAX_WEB_SEARCHES_PER_TURN
     max_subagents: int = _DEFAULT_MAX_SUBAGENTS_PER_TURN
+    max_execute_code_calls: int = _DEFAULT_MAX_EXECUTE_CODE_CALLS_PER_TURN
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> "LoopCapConfig":
@@ -238,6 +240,30 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
         exit_code = data.get("exit_code") if isinstance(data, dict) else None
         return (True, f" [exit {exit_code}]") if exit_code is not None and exit_code != 0 else (False, "")
 
+    if tool_name == "execute_code":
+        data = safe_json_loads(result)
+        if isinstance(data, dict):
+            exit_code = data.get("exit_code")
+            if exit_code is not None and exit_code != 0:
+                return True, f" [exit {exit_code}]"
+            output = str(data.get("output") or data.get("stdout") or "")[:2000]
+        else:
+            output = result[:2000]
+        lower_output = output.lower()
+        semantic_markers = (
+            "http error ",
+            "traceback (most recent call last)",
+            "query failed:",
+            "search failed:",
+            "file not found",
+            "filenotfounderror",
+            "permissionerror",
+            "connection refused",
+        )
+        if any(marker in lower_output for marker in semantic_markers):
+            return True, " [error]"
+        return False, ""
+
     if tool_name == "memory":
         data = safe_json_loads(result)
         if isinstance(data, dict) and data.get("success") is False and "exceed the limit" in data.get("error", ""):
@@ -281,6 +307,10 @@ _DECISION_MESSAGES: dict[str, str] = {
         "Blocked delegate_task: this turn has already spawned {count} subagents (limit {cap}). "
         "This looks like a runaway delegation loop. Finish the work with the results you have and answer the user."
     ),
+    "loop_execute_code_cap": (
+        "Blocked execute_code: this turn has already made {cap} execute_code calls. "
+        "This looks like a runaway code-execution loop. Use the results already available, switch tools, or explain the blocker."
+    ),
 }
 
 _IDENTICAL_CALL_NOTICE = (
@@ -294,6 +324,7 @@ _IDENTICAL_CALL_NOTICE = (
 _LOOP_CAPS: dict[str, tuple[str, str, str]] = {
     "web_search": ("max_web_searches", "_turn_web_search_count", "loop_web_search_cap"),
     "delegate_task": ("max_subagents", "_turn_subagent_count", "loop_subagent_cap"),
+    "execute_code": ("max_execute_code_calls", "_turn_execute_code_count", "loop_execute_code_cap"),
 }
 
 
@@ -331,6 +362,7 @@ class ToolCallGuardrailController:
         self._persisted_result_paths: dict[str, str] = {}
         self._turn_web_search_count = 0
         self._turn_subagent_count = 0
+        self._turn_execute_code_count = 0
         self._web_evidence_success_count = 0
 
     @property
