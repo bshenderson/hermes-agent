@@ -405,6 +405,36 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
 
 
+def test_web_search_synthesis_redirect_ends_turn_instead_of_looping():
+    """A redirect decision is a stop condition, not just another synthetic tool
+    result.  Qwen-family local models can keep requesting fresh broad searches
+    after the redirect hint; ending the turn prevents post-answer tool bloat.
+    """
+    agent = _make_agent("web_search", max_iterations=10)
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("web_search", json.dumps({"query": f"broad {i}"}), f"c{i}")],
+        )
+        for i in range(1, 7)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+
+    with (
+        patch("model_tools.handle_function_call", return_value=json.dumps({"data": {"web": []}})) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("keep broad-searching")
+
+    assert mock_hfc.call_count == 4
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "web_search_synthesis_redirect"
+    assert "stopped retrying" in result["final_response"]
+
+
 
 
 def test_guardrail_halt_emits_final_response_through_stream_delta_callback():

@@ -207,7 +207,7 @@ class ToolGuardrailDecision:
 
     @property
     def should_halt(self) -> bool:
-        return self.action in {"block", "halt"}
+        return self.action in {"block", "halt", "redirect"}
 
     def to_metadata(self) -> dict[str, Any]:
         data = asdict(self)
