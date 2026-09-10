@@ -178,6 +178,8 @@ class TestProfileRuntimeStatus:
 
 class _SecondaryRecoveryAdapter:
     platform = Platform.DISCORD
+    send_path_degraded = False
+    DEGRADED_STATUS_MESSAGE = "Receive path recovering"
 
     def __init__(self, *, retryable=True):
         self.fatal_error_retryable = retryable
@@ -345,6 +347,54 @@ class TestSecondaryProfileFatalRecovery:
         monkeypatch.setattr(runner, "_connect_initial_adapter_with_timeout", connect)
         assert await runner._start_one_profile_adapters("reviewer", Path("/profiles/reviewer"), {}) == 1
         assert synced == [adapter]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["recovered", "degraded", "failed", "superseded", "shutdown"])
+    async def test_secondary_reconnect_persists_only_owned_recovery(self, monkeypatch, outcome):
+        from gateway.status import read_runtime_status
+
+        runner = _secondary_recovery_runner()
+        replacement = _SecondaryRecoveryAdapter(retryable=False)
+        replacement.has_fatal_error = outcome == "failed"
+        replacement.send_path_degraded = outcome == "degraded"
+        winner = _SecondaryRecoveryAdapter()
+        key = "default-profile:email"
+        runner._update_platform_runtime_status(
+            key, platform_state="fatal", error_code="email_imap_connect_error",
+            error_message="[UNAVAILABLE] Service temporarily unavailable",
+            needs_attention=True, retrying_since="outage-start",
+        )
+        runner._update_platform_runtime_status(
+            "other:email", platform_state="fatal", error_code="other_error",
+            error_message="Other mailbox unavailable",
+        )
+        before = read_runtime_status()["platforms"]
+
+        async def attempt(profile, platform):
+            assert (profile, platform) == ("default-profile", Platform.EMAIL)
+            if outcome == "superseded":
+                runner._profile_adapters[profile] = {platform: winner}
+            if outcome == "shutdown":
+                runner._running = False
+            return replacement, outcome != "failed"
+
+        monkeypatch.setattr(runner, "_secondary_reconnect_attempt", attempt)
+        await runner._run_secondary_profile_reconnect("default-profile", Platform.EMAIL)
+        after = read_runtime_status()["platforms"]
+        assert after["other:email"] == before["other:email"]
+        assert "email" not in after
+        if outcome in {"recovered", "degraded"}:
+            assert runner._profile_adapters["default-profile"][Platform.EMAIL] is replacement
+            assert after[key]["state"] == ("retrying" if outcome == "degraded" else "connected")
+            assert after[key]["error_code"] is None
+            assert after[key]["error_message"] == (
+                replacement.DEGRADED_STATUS_MESSAGE if outcome == "degraded" else None
+            )
+            assert after[key]["needs_attention"] is False
+            assert after[key]["retrying_since"] is None
+        else:
+            assert after[key] == before[key]
+            assert replacement.disconnected is True
 
     @pytest.mark.asyncio
     async def test_retryable_secondary_fatal_reconnects_with_its_profile_scope(

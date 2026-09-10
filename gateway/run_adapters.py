@@ -1141,6 +1141,16 @@ class GatewayAdapterLifecycleMixin:
                         if platform not in profile_map:
                             profile_map[platform] = adapter
                             self._sync_voice_mode_state_to_adapter(adapter)
+                            # Secondary health uses a profile-qualified key; clearing the primary
+                            # platform leaves a stale fatal badge after this adapter recovers.
+                            degraded = adapter.send_path_degraded
+                            self._update_platform_runtime_status(
+                                f"{profile_name}:{platform.value}",
+                                platform_state="retrying" if degraded else "connected",
+                                error_code=None,
+                                error_message=adapter.DEGRADED_STATUS_MESSAGE if degraded else None,
+                                needs_attention=False, retrying_since=None,
+                            )
                             logger.info("✓ %s reconnected (profile: %s)", platform.value, profile_name)
                             await self._redeliver_failed_obligations_for_platform(
                                 platform, profile=profile_name
