@@ -230,6 +230,18 @@ def test_async_stream_mirror_honours_the_host_deadline():
     assert stream.yielded == 1
 
 
+def test_generic_chat_stream_stops_on_explicit_host_cancel():
+    cancel_event = threading.Event()
+    accumulator = aux._ChatStreamAccumulator(model="test-model")
+    cancel_event.set()
+
+    with aux.aux_interrupt_protection(cancel_event=cancel_event):
+        with pytest.raises(aux.AuxiliaryExplicitCancellation):
+            accumulator.feed(_chunk("must not be retained"))
+
+    assert accumulator.content_parts == []
+
+
 # ── The isolated provider daemon must inherit it ─────────────────────────
 
 

@@ -6366,6 +6366,11 @@ class _ChatStreamAccumulator:
         return made_progress
 
     def feed(self, chunk: Any) -> None:
+        # The generic OpenAI-compatible stream must honor the same explicit hard-cancel source as
+        # Anthropic/Codex adapters. Without this edge, streamed compression keeps decoding after its
+        # CLI/gateway host has stopped even though the protected provider worker inherited the event.
+        if _aux_interrupt_cancel_requested():
+            raise AuxiliaryExplicitCancellation()
         # Every frame records transport timing (TTFP); only a substantive payload ticks the
         # forward-progress hook that keeps compression alive.
         _notify_aux_timing_response()

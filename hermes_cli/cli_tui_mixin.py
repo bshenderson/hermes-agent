@@ -895,16 +895,18 @@ class CLITuiMixin:
             ("_command_palette_state", self._close_command_palette))):
             return
         overlay_cleared = self._tui_clear_blocking_overlays(event)
-        if overlay_cleared and not (self._agent_running and self.agent):
+        active_work = (self._agent_running or self._command_running) and self.agent
+        if overlay_cleared and not active_work:
             return
-        if self._agent_running and self.agent:
+        if active_work:
             if now - self._last_ctrl_c_time < 2.0:
                 print("\n⚡ Force exiting...")
                 self._should_exit = True
                 event.app.exit()
                 return
             self._last_ctrl_c_time = now
-            print("\n⚡ Interrupting agent... (press Ctrl+C again to force exit)")
+            label = "command" if self._command_running and not self._agent_running else "agent"
+            print(f"\n⚡ Interrupting {label}... (press Ctrl+C again to force exit)")
             request_hard_interrupt(self.agent)
         else:
             self._tui_clear_or_exit(event)
@@ -918,10 +920,11 @@ class CLITuiMixin:
             ("_model_picker_state", self._close_model_picker))):
             return
         overlay_cleared = self._tui_clear_blocking_overlays(event)
-        if overlay_cleared and not (self._agent_running and self.agent):
+        active_work = (self._agent_running or self._command_running) and self.agent
+        if overlay_cleared and not active_work:
             return
-        if self._agent_running and self.agent:
-            print("\n⚡ Interrupting agent...")
+        if active_work:
+            print("\n⚡ Interrupting command...")
             request_hard_interrupt(self.agent)
         else:
             self._tui_clear_or_exit(event)
