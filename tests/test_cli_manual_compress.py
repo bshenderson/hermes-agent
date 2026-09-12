@@ -16,12 +16,16 @@ class DummyAgent:
         self.flush_error = None
         self.host_events = []
         self.boundary_calls = []
+        self.hard_interrupt_calls = []
         self.context_compressor = type("ContextEngineStub", (), {})()
         self.context_compressor.on_session_start = self._record_boundary
 
     def _record_boundary(self, session_id, **kwargs):
         self.host_events.append("notify")
         self.boundary_calls.append((session_id, kwargs))
+
+    def hard_interrupt(self, message=None, *, tool_reason=None):
+        self.hard_interrupt_calls.append((message, tool_reason))
 
     def _flush_messages_to_session_db(self, messages, _session_id=None):
         self.host_events.append("persist")
@@ -117,3 +121,30 @@ def test_manual_compress_flush_failure_discards_notification(monkeypatch):
     assert len(cli.agent.flush_calls) == 1
     assert cli.agent.host_events == ["persist"]
     assert cli.agent.boundary_calls == []
+
+
+def test_manual_compress_ctrl_c_publishes_explicit_hard_cancel(capsys):
+    cli = HermesCLI.__new__(HermesCLI)
+    cli.conversation_history = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    cli.agent = DummyAgent()
+    cli.session_id = "old-session"
+    cli._pending_title = None
+    cli._busy_command = lambda _message, **_kwargs: nullcontext()
+
+    def _interrupt_compression(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    cli.agent._compress_context = _interrupt_compression
+
+    cli._manual_compress("/compress")
+
+    assert cli.agent.hard_interrupt_calls == [
+        ("manual compression interrupted", "manual compression interrupted")
+    ]
+    assert cli.conversation_history[-1]["content"] == "four"
+    assert "Compression interrupted" in capsys.readouterr().out

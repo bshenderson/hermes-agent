@@ -1149,6 +1149,15 @@ class CLISessionMixin:
                 print(f"     {summary['token_line']}")
                 if summary["note"]:
                     print(f"     {summary['note']}")
+            except KeyboardInterrupt:
+                # Manual /compress runs outside run_conversation(), so a terminal Ctrl-C reaches this
+                # command directly instead of the normal frontend stop path. Publish the same explicit
+                # hard-cancel event before swallowing the interrupt; protected auxiliary streams poll it
+                # and close their owned provider request rather than decoding until the timeout ceiling.
+                self.agent.hard_interrupt(
+                    "manual compression interrupted", tool_reason="manual compression interrupted")
+                finalize_context_engine_compression_notification(self.agent, committed=False)
+                print("  ⚡ Compression interrupted.")
             except Exception as e:
                 finalize_context_engine_compression_notification(self.agent, committed=False)
                 print(f"  ❌ Compression failed: {e}")

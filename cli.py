@@ -3632,7 +3632,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # Arm the exit backstop now that shutdown intent is unambiguous — covers wedges in the unwind below
         # that would otherwise leave the process alive with no watchdog (#65998 class).
         _arm_exit_watchdog_on_shutdown_signal()
-        if self._agent_running:
+        if self._agent_running or self._command_running:
+            # Slow slash commands such as /compress execute outside the normal conversation turn but can
+            # still own an auxiliary provider request. Treat process shutdown during either activity as an
+            # explicit hard stop so protected compression does not survive its CLI host.
             _interrupt_agent_for_signal(self.agent, signum)
         # Prefer app.exit() over raising KeyboardInterrupt: a KBI from a signal handler
         # lands in a pt Task ("Unhandled exception in event loop" + "Press ENTER to
