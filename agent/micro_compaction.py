@@ -132,6 +132,13 @@ class MicroCompactionMixin:
             })
 
         try:
+            from agent.compression_budget import lossless_settings
+            budget = lossless_settings()
+            if budget:
+                # Oversized micro exchanges remain intact for the bounded batch pass.
+                size = sum(len(m["content"].encode("utf-8")) for m in call_kwargs["messages"])
+                if size + budget["output_tokens"] + budget["safety_tokens"] > budget["context_length"]:
+                    return None
             with aux_interrupt_protection():
                 response = call_llm(**call_kwargs)
         except Exception as exc:
