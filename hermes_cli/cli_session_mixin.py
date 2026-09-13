@@ -1032,8 +1032,12 @@ class CLISessionMixin:
             print("(._.) Not enough conversation to compress (need at least 4 messages).")
             return
         if not self.agent:
-            print("(._.) No active agent -- send a message first.")
-            return
+            # Resumed sessions preload durable history before lazily creating AIAgent. Manual compression
+            # needs only that restored history, so initialize the agent here instead of requiring a throwaway
+            # model turn first (which can itself stall on the lane the operator is trying to avoid).
+            if not self._init_agent():
+                print("(._.) No active agent -- provider initialization failed.")
+                return
 
         from hermes_cli.partial_compress import (
             extract_compress_flags, parse_partial_compress_args, rejoin_compressed_head_and_tail,

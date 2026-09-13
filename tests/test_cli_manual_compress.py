@@ -64,6 +64,37 @@ class DummyAgent:
         return ([{"role": "user", "content": "[CONTEXT SUMMARY]: compacted"}], "new system prompt")
 
 
+def test_manual_compress_initializes_agent_for_resumed_history(monkeypatch):
+    cli = HermesCLI.__new__(HermesCLI)
+    cli.conversation_history = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    cli.agent = None
+    cli.session_id = "old-session"
+    cli._pending_title = None
+    cli._busy_command = lambda _message, **_kwargs: nullcontext()
+    initialized = []
+
+    def _init_agent():
+        initialized.append(True)
+        cli.agent = DummyAgent()
+        return True
+
+    cli._init_agent = _init_agent
+    monkeypatch.setattr(
+        "agent.manual_compression_feedback.summarize_manual_compression",
+        lambda *args, **kwargs: {
+            "noop": False, "headline": "compressed", "token_line": "tokens reduced", "note": ""})
+
+    cli._manual_compress("/compress")
+
+    assert initialized == [True]
+    assert cli.agent.calls
+
+
 def test_manual_compress_does_not_pass_cached_system_prompt(monkeypatch):
     """Manual /compress should rebuild the next prompt without nesting the old one."""
     cli = HermesCLI.__new__(HermesCLI)
