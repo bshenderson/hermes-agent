@@ -447,10 +447,12 @@ def aux_stream_deadline(deadline: Optional[float]):
 def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any], kwargs: dict[str, Any]) -> Any:
     """Run one protected provider callback in an attempt-isolated daemon thread.
 
-    Aux clients are process-shared and cannot be closed to wake one request, so the callback (incl.
-    stream aggregation) runs in a daemon while the owner polls cancellation; on cancel the owner
-    unwinds at once and the daemon finishes under the provider timeout in ``kwargs`` (it owns no
-    transcript/commit state, never holds the session lock). Unprotected / no cancel source: direct.
+    Aux clients are process-shared, so the callback (incl. stream aggregation) runs
+    in a daemon while the owner polls cancellation. Protected sync OpenAI calls
+    get an attempt-owned transport in _create_with_progress_once, allowing socket
+    shutdown without closing the cached client. Other adapters retain their own
+    cancellation/timeout behavior. The daemon owns no transcript/commit state and
+    never holds the session lock. Unprotected / no cancel source: direct.
     """
     source_cancel_check = _capture_aux_cancel_check()
     if not _aux_interrupt_protected() or not callable(source_cancel_check):
@@ -3752,6 +3754,15 @@ async def _call_fallback_candidate_async(
         return None
 
 
+def _compression_fallbacks_disabled(task: Optional[str]) -> bool:
+    """An explicit empty compression chain forbids implicit cross-route recovery.
+
+    Missing/null chains retain legacy behavior. Read per call so a persisted
+    compression policy change also reaches already-created clients.
+    """
+    return task == "compression" and _get_auxiliary_task_config(task).get("fallback_chain") == []
+
+
 def _try_payment_fallback(
     failed_provider: str, task: str = None, reason: str = "payment error"
 ) -> Tuple[Optional[Any], Optional[str], str]:
@@ -6216,6 +6227,21 @@ def _stream_request_plan(kwargs: Dict[str, Any]) -> "Tuple[Dict[str, Any], str, 
 def _create_with_progress_once(
     client: Any, kwargs: Dict[str, Any], task: Optional[str] = None, *, force_stream: bool = False
 ) -> Any:
+    """Give protected sync OpenAI requests independent cancellation ownership."""
+    from openai import OpenAI as SyncOpenAI
+    cancel_check = _capture_aux_cancel_check()
+    if _aux_interrupt_protected() and cancel_check is not None and isinstance(client, SyncOpenAI):
+        from agent.auxiliary_request import cancellable_openai_attempt
+        with cancellable_openai_attempt(
+            client, cancel_check, verify=_resolve_aux_verify(str(client.base_url))
+        ) as owned:
+            return _create_with_progress_impl(owned, kwargs, task, force_stream=force_stream)
+    return _create_with_progress_impl(client, kwargs, task, force_stream=force_stream)
+
+
+def _create_with_progress_impl(
+    client: Any, kwargs: Dict[str, Any], task: Optional[str] = None, *, force_stream: bool = False
+) -> Any:
     """create() that streams (and re-aggregates, ticking the hook per substantive chunk) when a
     progress hook is active or the provider is stream-only; plain ``create(**kwargs)`` otherwise
     or when the adapter streams internally. Streaming rejections fall back to a plain call —
@@ -6485,6 +6511,8 @@ def _resolve_call_client(
             task=task)
         effective_provider = _effective_provider_for_client(client, resolved_provider)
         if client is None:
+            if _compression_fallbacks_disabled(task):
+                raise RuntimeError("Configured compression provider unavailable; fallback_chain is explicitly empty")
             # Explicit provider with no credentials: honor the task fallback_chain before
             # raising (fallback entries may use OAuth / credential-pool auth).
             _explicit = (resolved_provider or "").strip().lower()
@@ -6797,6 +6825,8 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     response) bypass the explicit-provider gate — the provider cannot serve this request
     regardless of user intent. Auth errors only fall back in auto mode."""
     task, tag, resolved_provider = route.task, route.tag, route.resolved_provider
+    if _compression_fallbacks_disabled(task):
+        return None
     # Respect explicit provider choice for transient errors (auth, request validation, etc.) but allow
     # fallback when the provider clearly cannot serve the request due to capacity: payment/quota exhaustion
     # and connection failures are capacity problems, not request constraints. See #26803: daily token quota

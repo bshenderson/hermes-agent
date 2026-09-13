@@ -1073,6 +1073,16 @@ class CLISessionMixin:
                 print(f"🗜️  {line}")
             return
 
+        # Unlike a chat turn, a manual command never enters run_conversation's
+        # interrupt reset. A completed Ctrl-C must not poison the next /compress.
+        # Reset only at the new idle command boundary, never in finally: an old
+        # detached worker still needs its cancelled commit fence while unwinding.
+        if getattr(self, "_agent_running", False):
+            print("(._.) Wait for the active agent turn before compressing.")
+            return
+        clear_interrupt = getattr(self.agent, "clear_interrupt", None)
+        if callable(clear_interrupt):
+            clear_interrupt()
         original_count = len(self.conversation_history)
         with self._busy_command("Compressing context...", blocks_input=False):
             try:
