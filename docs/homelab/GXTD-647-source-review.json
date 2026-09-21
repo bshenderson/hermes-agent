@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "security_concerns": [],
+  "logic_errors": [],
+  "suggestions": [
+    {
+      "path": "gateway/platforms/api_server.py",
+      "line": 1568,
+      "note": "The use of `await request.json()` inside a middleware-like block in APIServerAdapter could potentially consume the request body stream, which might affect subsequent handlers if not handled by the framework's caching mechanism (though aiohttp usually caches it)."
+    }
+  ],
+  "summary": "The integration candidate successfully preserves production invariants while incorporating upstream updates. Key verifications:\n- Research-only tool policy: Implemented via `preferred_web_policy` in `api_server.py`, restricting enabled toolsets to ['web'] and adding a strict system prompt.\n- Endpoint pins: Firecrawl provider now checks `required_endpoints` in config and enforces direct SDK configuration if pinned.\n- Bounded synthesis: `turn_tool_round.py` correctly handles `web_search_synthesis_redirect`, triggering `synthesize_collected_web` when budget is reached.\n- SSE Cancellation: `api_server_openai_routes.py` now checks `request.transport.is_closing()` in `_iter_stream_items` to raise `ConnectionResetError` immediately upon client disconnect.\n- CLI Recovery: `cli_session_mixin.py` adds explicit `hard_interrupt` and notification handling for KeyboardInterrupt during manual compression, preventing state poisoning.\n- Upstream Features: Relay metadata, notification suppression, and session-history delivery default deny are preserved/integrated. New telemetry observation (`new_turn`) is correctly wrapped around agent runs."
+}

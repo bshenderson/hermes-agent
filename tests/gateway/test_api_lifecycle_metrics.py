@@ -132,5 +132,3 @@ def test_concurrent_outcomes_and_callback_exception_are_preserved():
     assert caught.value is error
     assert 'hermes_api_executors_active{family="request"} 0' in collector.render()
     assert 'PRIVATE-' not in collector.render()
-
-

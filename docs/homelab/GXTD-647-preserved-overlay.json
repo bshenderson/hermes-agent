@@ -1,0 +1,24 @@
+{
+  "head": "2bf7d6ba1135f46330a9745af6910b287bc6c2e7",
+  "upstream": "4c2c20f6e7c3ac9dfc1b1049f68391e08f8dffa1",
+  "files": {
+    "agent/agent_runtime_helpers.py": "acb9ade8aeaa7c9f028f229df9136969868e4cf92ca05a86cfe1324c270853d8",
+    "agent/chat_location.py": "deddf52a96883c1f5e0ba577b4420e39a7fc7250832d2b57ccfb03c17f19af2b",
+    "agent/preferred_web_policy.py": "8b04fa863496c3b9c26b0af4df881dd2a0c112f4c74fcb29814506d1b4ad955a",
+    "agent/tool_executor.py": "5ddb02880c239bc103afc0b372dfb93de3c6aed23f42f7110722f9ce26d29597",
+    "agent/tool_guardrails.py": "d42a3b387616af41823d70ac25615679032990c68a5367f79cb0c61c7df4221a",
+    "agent/turn_tool_round.py": "e943c853f90ceaf4344b375c260d7ea2363c3463dc721a757e4855928097431d",
+    "agent/web_synthesis.py": "032ffd6ecd3c3ab439331ddbf9fed1e1f93a7d752fffaa70a8e6a314c7537ec3",
+    "gateway/platforms/api_server.py": "0676d2d324658db130ec400ffffd6d6b09361e62b83e74d1d5c91281b747a7ba",
+    "gateway/platforms/api_server_delivery_metrics.py": "5efde4cb314d861b13a026000bf9444b6d4ec67322cf8e884e79448309c912dd",
+    "gateway/platforms/api_server_lifecycle_metrics.py": "5da00b70d6613490f388e7cccc645dee955e80badb2ef962a0529fc579089ac6",
+    "gateway/platforms/api_server_openai_routes.py": "a60f9b29823c2d0d60195da2311a0e0f40b934816f3004669cd8a8ad77099b34",
+    "gateway/platforms/api_server_runs.py": "19b821a2055dbb49f2d8d61b9c88b689932bfc2aab75dc830a8f15bd4617df83",
+    "gateway/platforms/api_server_runtime_metrics.py": "22c1e73549ff6571305caf840ab0ed935a464f0d5787a4b77f08ca3e421a70f1",
+    "plugins/web/firecrawl/provider.py": "3f40cc94fdcc10ee8648bce8954ae796e40d3cc776c2d951d2901761f37ae1d8",
+    "run_agent.py": "aa5740f8a91f76fcec988863f0ea11236c6e2902fabd7ee9730565f1419f7913",
+    "tests/gateway/test_sse_disconnect.py": "f009ba8021f0b1608e41cfd524239c8874b440944a342ffaf7f1ace47a1f9c04",
+    "tools/web_backend_policy.py": "9adae5f595687fc94fe1da134a1b33b290ebc78d807e2517a3b56ac32acd7094",
+    "tools/web_tools.py": "742f641efe488a3ceb9b4173b5be5c4712dece2a7042d5a0b93c57ca8a92ead6"
+  }
+}

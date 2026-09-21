@@ -78,5 +78,3 @@ async def test_native_cancelled_waiter_does_not_end_executor(native, monkeypatch
         await asyncio.sleep(.01)
     assert f'hermes_api_executor_outcomes_total{{family="{family}",outcome="interrupted"}} 1' in text
     assert 'PRIVATE-' not in text
-
-

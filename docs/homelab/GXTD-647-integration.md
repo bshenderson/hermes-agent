@@ -1,6 +1,6 @@
 # GXTD-647 — Hermes upstream integration candidate
 
-Status: candidate validation in progress; **live deployment held separately**.
+Status: **prepared, tested and ready for branch review; live deployment held separately**.
 
 ## Authority and boundary
 
@@ -93,7 +93,24 @@ the integration worktree, not production. CLI `--help` is exercised without user
 credentials or real model requests. A bounded read-only review found no blocking
 issues in the integration delta; that is not an audit of every upstream change.
 
-Detailed final results are recorded in the adjacent validation artifact and Jira.
+## Final validation
+
+- Frozen committed-source matrix: **139 files; 1,525 passed, 0 failed, 7 skipped**,
+  with two workers, no retries, and the isolated frozen-lock Python environment.
+- Tested source commit: `9eb8b37e95c6e389580ead24d6b4bbfc467d8ef6` in a fresh
+  detached worktree, without untracked fixtures from the preparation checkout.
+- Import smoke, CLI help, dependency compatibility and focused undefined-name/
+  syntax lint passed. Real loopback HTTP and worker-cancellation tests passed.
+- Final report additions and trailing-blank-line cleanup in two tests do not alter
+  runtime code or the test runner. Those two files were exercised again: 12 passed.
+- `GXTD-647-validation.json` contains the exact test-file inventory, results,
+  scope/non-claims and private log digests. `GXTD-647-preserved-overlay.json` records
+  all original deployed overlay hashes. `GXTD-647-source-review.json` preserves the
+  bounded source-review verdict. The failed tool-based fixture-review attempt is
+  not counted as acceptance.
+
+These results qualify branch preparation, not production adoption. No skip,
+mocked model response or offline result is represented as live acceptance.
 
 ## Artifact alignment and deployment hold
 

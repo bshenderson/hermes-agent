@@ -1,0 +1,260 @@
+{
+  "issue": "GXTD-647",
+  "branch": "integration/GXTD-647-upstream",
+  "upstream": "4c2c20f6e7c3ac9dfc1b1049f68391e08f8dffa1",
+  "tested_commit": "9eb8b37e95c6e389580ead24d6b4bbfc467d8ef6",
+  "preservation_commit": "06fae659ca76a1123b3808c2a10c1d7c27ba604d",
+  "matrix": {
+    "files": 139,
+    "passed": 1525,
+    "failed": 0,
+    "skipped": 7,
+    "seconds": 552.8,
+    "retries": 0,
+    "workers": 2,
+    "test_files": [
+      "tests/agent/test_413_compression.py",
+      "tests/agent/test_aux_owned_cancellation.py",
+      "tests/agent/test_aux_stream_host_deadline.py",
+      "tests/agent/test_auxiliary_compression_timeout_floor.py",
+      "tests/agent/test_chat_location.py",
+      "tests/agent/test_compress_context_fallback_shim.py",
+      "tests/agent/test_compress_context_progress_timeout.py",
+      "tests/agent/test_compress_focus.py",
+      "tests/agent/test_compress_focus_plugin_fallback.py",
+      "tests/agent/test_compress_signal_leak.py",
+      "tests/agent/test_compressed_summary_metadata.py",
+      "tests/agent/test_compression_abort_state_reset.py",
+      "tests/agent/test_compression_adoption_preserves_live_tail.py",
+      "tests/agent/test_compression_anti_thrash_persistence.py",
+      "tests/agent/test_compression_anti_thrash_recovery.py",
+      "tests/agent/test_compression_attempt_lifecycle.py",
+      "tests/agent/test_compression_attempt_ownership.py",
+      "tests/agent/test_compression_attempt_telemetry.py",
+      "tests/agent/test_compression_auto_summary_fallback.py",
+      "tests/agent/test_compression_boundary.py",
+      "tests/agent/test_compression_boundary_hook.py",
+      "tests/agent/test_compression_budget_rearm.py",
+      "tests/agent/test_compression_budget_refund.py",
+      "tests/agent/test_compression_busy_steer_anchor.py",
+      "tests/agent/test_compression_child_source.py",
+      "tests/agent/test_compression_closed_adoption.py",
+      "tests/agent/test_compression_commit_fence_race.py",
+      "tests/agent/test_compression_concurrent_fork.py",
+      "tests/agent/test_compression_count_warning.py",
+      "tests/agent/test_compression_explicit_no_fallback.py",
+      "tests/agent/test_compression_fallback_budget.py",
+      "tests/agent/test_compression_feasibility.py",
+      "tests/agent/test_compression_interrupt_protection.py",
+      "tests/agent/test_compression_lock_defer.py",
+      "tests/agent/test_compression_logging_session_context.py",
+      "tests/agent/test_compression_max_attempts_config.py",
+      "tests/agent/test_compression_orphan_recovery.py",
+      "tests/agent/test_compression_persistence.py",
+      "tests/agent/test_compression_progress.py",
+      "tests/agent/test_compression_review.py",
+      "tests/agent/test_compression_rotation_state.py",
+      "tests/agent/test_compression_small_ctx_threshold_floor.py",
+      "tests/agent/test_compression_split_failure_cooldown.py",
+      "tests/agent/test_compression_stall_deterministic_fallback.py",
+      "tests/agent/test_compression_stall_fallback.py",
+      "tests/agent/test_compression_stall_interrupt.py",
+      "tests/agent/test_compression_supersession_split.py",
+      "tests/agent/test_compression_timeout_terminal.py",
+      "tests/agent/test_compression_trigger_excludes_reasoning.py",
+      "tests/agent/test_compression_worker_isolation.py",
+      "tests/agent/test_compressor_actionable_tail_anchor.py",
+      "tests/agent/test_compressor_assistant_tail_anchor.py",
+      "tests/agent/test_compressor_fallback_update.py",
+      "tests/agent/test_compressor_historical_media.py",
+      "tests/agent/test_compressor_image_tokens.py",
+      "tests/agent/test_compressor_media_stripping.py",
+      "tests/agent/test_compressor_stale_tool_images.py",
+      "tests/agent/test_compressor_tail_cut_oob_fix.py",
+      "tests/agent/test_compressor_tail_cut_tool_pair_floor.py",
+      "tests/agent/test_compressor_tool_call_budget.py",
+      "tests/agent/test_compressor_truncated_summary_guard.py",
+      "tests/agent/test_compressor_zero_user_guard.py",
+      "tests/agent/test_context_compressor.py",
+      "tests/agent/test_context_compressor_cross_session_guard.py",
+      "tests/agent/test_context_compressor_custom_providers.py",
+      "tests/agent/test_context_compressor_reasoning_fallback.py",
+      "tests/agent/test_context_compressor_session_end_clears_state.py",
+      "tests/agent/test_context_compressor_structural_backoff.py",
+      "tests/agent/test_context_compressor_summary_continuity.py",
+      "tests/agent/test_context_compressor_summary_hook_compat.py",
+      "tests/agent/test_context_compressor_task_heading.py",
+      "tests/agent/test_context_compressor_temporal_anchoring.py",
+      "tests/agent/test_context_compressor_zero_user_provenance.py",
+      "tests/agent/test_conversation_compression_manual.py",
+      "tests/agent/test_fast_compression_lane.py",
+      "tests/agent/test_gxtd586_compression_budget.py",
+      "tests/agent/test_gxtd586_compression_integration.py",
+      "tests/agent/test_manual_compression_feedback.py",
+      "tests/agent/test_manual_compression_refusal_feedback.py",
+      "tests/agent/test_over_window_compression_fail_closed.py",
+      "tests/agent/test_per_model_compression_threshold.py",
+      "tests/agent/test_post_compression_trim.py",
+      "tests/agent/test_post_tool_compression_attempt_cap.py",
+      "tests/agent/test_pre_compress_checkpoint_contract.py",
+      "tests/agent/test_pre_compress_memory_context.py",
+      "tests/agent/test_pre_compress_memory_context_handoff.py",
+      "tests/agent/test_preferred_web_dispatch.py",
+      "tests/agent/test_preferred_web_policy.py",
+      "tests/agent/test_preflight_compression_cap_e2e.py",
+      "tests/agent/test_preflight_compression_gate.py",
+      "tests/agent/test_preflight_compression_timeout_fail_closed.py",
+      "tests/agent/test_tool_call_guardrail_runtime.py",
+      "tests/agent/test_tool_guardrails.py",
+      "tests/agent/test_uncompressed_context_guardrail.py",
+      "tests/agent/test_web_synthesis.py",
+      "tests/gateway/test_api_lifecycle_metrics.py",
+      "tests/gateway/test_api_lifecycle_native.py",
+      "tests/gateway/test_api_server.py",
+      "tests/gateway/test_api_server_active_work_drain.py",
+      "tests/gateway/test_api_server_bind_guard.py",
+      "tests/gateway/test_api_server_compaction_projection.py",
+      "tests/gateway/test_api_server_declared_conversation.py",
+      "tests/gateway/test_api_server_jobs.py",
+      "tests/gateway/test_api_server_media_data_urls.py",
+      "tests/gateway/test_api_server_multimodal.py",
+      "tests/gateway/test_api_server_multiplex_secret_scope.py",
+      "tests/gateway/test_api_server_normalize.py",
+      "tests/gateway/test_api_server_profile_prefix_misdelivery.py",
+      "tests/gateway/test_api_server_reasoning_ladder.py",
+      "tests/gateway/test_api_server_reasoning_nonstream.py",
+      "tests/gateway/test_api_server_reasoning_stream.py",
+      "tests/gateway/test_api_server_responses_history_cap.py",
+      "tests/gateway/test_api_server_responses_history_dedupe.py",
+      "tests/gateway/test_api_server_room_dispatch.py",
+      "tests/gateway/test_api_server_room_grants.py",
+      "tests/gateway/test_api_server_run_idempotency.py",
+      "tests/gateway/test_api_server_runs.py",
+      "tests/gateway/test_api_server_runs_extraction.py",
+      "tests/gateway/test_api_server_runs_import_isolation.py",
+      "tests/gateway/test_api_server_sse_keepalive.py",
+      "tests/gateway/test_api_server_status_stream.py",
+      "tests/gateway/test_api_server_toolset.py",
+      "tests/gateway/test_api_server_turn_boundary.py",
+      "tests/gateway/test_homelab_overlay_integration.py",
+      "tests/gateway/test_multiplex_adapter_registry.py",
+      "tests/gateway/test_preferred_web_http.py",
+      "tests/gateway/test_sse_disconnect.py",
+      "tests/hermes_cli/test_cli_manual_compress.py",
+      "tests/hermes_cli/test_manual_compress.py",
+      "tests/hermes_cli/test_manual_compress_recovery.py",
+      "tests/hermes_cli/test_tools_config.py",
+      "tests/test_cli_command_interrupt.py",
+      "tests/test_cli_signal_command_interrupt.py",
+      "tests/tools/test_web_backend_policy.py",
+      "tests/tools/test_web_tools_config.py",
+      "tests/tools/test_web_tools_dict_urls.py",
+      "tests/tools/test_web_tools_perplexity.py",
+      "tests/tools/test_web_tools_tavily.py",
+      "tests/tools/test_web_tools_truncate.py"
+    ]
+  },
+  "environment": {
+    "python": "3.11.15",
+    "uv_frozen": true,
+    "extras": [
+      "dev",
+      "messaging",
+      "firecrawl",
+      "acp"
+    ],
+    "isolated_venv": "/home/barry/.cache/gxtd647-venv",
+    "installed_packages": 104,
+    "pip_check": "compatible",
+    "operator_home_used": false
+  },
+  "smoke": {
+    "candidate_import_paths": true,
+    "cli_help_exit": 0,
+    "undefined_name_and_syntax_lint": "passed"
+  },
+  "review": {
+    "source_review": "bounded; no blocking issues reported",
+    "record": "GXTD-647-source-review.json",
+    "scope": "integration delta, not whole upstream",
+    "failed_tool_based_fixture_review": "not counted as acceptance"
+  },
+  "post_matrix_changes": "Only documentation/results and removal of trailing blank lines in two tests; affected 12 tests passed separately. Runtime source and test runner unchanged.",
+  "live_deployed": false,
+  "fork_main_moved": false,
+  "production_dependencies_changed": false,
+  "private_logs": {
+    "http-and-guard-green.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/http-and-guard-green.log",
+      "sha256": "9b097423a14102d28016f6fe9de49749237afff7d476ee20f78a8c0067184eb4"
+    },
+    "import-smoke.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/import-smoke.log",
+      "sha256": "88622864ee0ce05af1f1158f9d9bac211abaa74d4d741dfb494ceb987048af17"
+    },
+    "compression-fixture-green.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/compression-fixture-green.log",
+      "sha256": "4a929b026f4f70b6522ce69c955fca2107a4a871c7d95ec944a1284481dea993"
+    },
+    "upstream-baseline.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/upstream-baseline.log",
+      "sha256": "495532cabf07771def1d23e8dd8aec0412444a2bb165e12dfe85f313f0f11885"
+    },
+    "dependencies-acp.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/dependencies-acp.log",
+      "sha256": "a8eec4e3618a9b8d992cc860e999a3f831ae23dd18f38a543026dff562a6ff46"
+    },
+    "remaining-fixtures-green.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/remaining-fixtures-green.log",
+      "sha256": "e95547c5a85a9593108495daf9b5c01ced46a3b54afe710114b62bdee7609f59"
+    },
+    "repaired.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/repaired.log",
+      "sha256": "65abc1ff9ee7ed8bb15c96b32b3d04032705c9df621e48023167ae6f1acdd2ec"
+    },
+    "cli-help.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/cli-help.log",
+      "sha256": "09bdbdff8d567728fe223ce7e4e32bbe2345d948756f9779ba0d80df47b3a227"
+    },
+    "formatting-retest.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/formatting-retest.log",
+      "sha256": "1063401bba758106eed850ce7a02e0553227c7cd495bf6cfba5638614a62f56d"
+    },
+    "local-whitespace.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/local-whitespace.log",
+      "sha256": "886087af422c71bca407c560357f49f1c9994743047dc69513f8412321152f07"
+    },
+    "dependencies.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/dependencies.log",
+      "sha256": "02d429201eb60ad91bbb3647c61d55ed11c698f3aa3cd52fa22ca7b107030a31"
+    },
+    "matrix.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/matrix.log",
+      "sha256": "a61f9a3e1513c59b57dfd2405c3b4fe06aa8679ce3da86b2e9d5041a772951d1"
+    },
+    "frozen-matrix.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/frozen-matrix.log",
+      "sha256": "c23cd630d8c98938fc90e57761e59887fba8b1d3bf63eaf19a45db2a6a65dd29"
+    },
+    "policy-integration.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/policy-integration.log",
+      "sha256": "e72594fe1d5f2a6e5c08c7d5fff2c7c7153a23e1990158f378a0b5a9074a70f8"
+    },
+    "initial.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/initial.log",
+      "sha256": "8fdb626ffaf68514bc52af8faae9fa38033ee8a3bc4dae62c6990bd3775b49d9"
+    },
+    "http-overlay.log": {
+      "path": "/home/barry/.cache/gxtd647-tests/http-overlay.log",
+      "sha256": "f06fb30d11cc020bb53d59a81bac080e768ea9747b1c5aa73c54469de47e88e0"
+    }
+  },
+  "not_claimed": [
+    "full upstream suite",
+    "Node/dashboard/TUI builds",
+    "real model calls",
+    "production service adoption",
+    "browser acceptance",
+    "non-Linux platforms"
+  ]
+}
