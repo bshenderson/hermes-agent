@@ -26,7 +26,7 @@ def compression_config(tmp_path, monkeypatch):
 @pytest.mark.parametrize("provider", ["custom:gpu0", "auto"])
 def test_provider_recovery_cannot_escape_empty_chain(compression_config, monkeypatch, provider):
     route = SimpleNamespace(task="compression", tag="", resolved_provider=provider,
-                            final_model="compressor", route_info={}, client=None)
+                            final_model="compressor", route_info={}, client=None, base_info="")
     candidates = []
     for name in ("_try_configured_fallback_chain", "_try_main_fallback_chain",
                  "_try_payment_fallback", "_try_main_agent_model_fallback"):
@@ -57,7 +57,7 @@ def test_missing_client_cannot_auto_discover(compression_config, monkeypatch, as
 def test_missing_or_nonempty_chain_keeps_existing_recovery(compression_config, monkeypatch, chain):
     compression_config(chain)
     route = SimpleNamespace(task="compression", tag="", resolved_provider="custom:gpu0",
-                            final_model="compressor", route_info={}, client=None)
+                            final_model="compressor", route_info={}, client=None, base_info="")
     for name in ("_try_configured_fallback_chain", "_try_main_fallback_chain", "_try_payment_fallback"):
         monkeypatch.setattr(ac, name, Mock(return_value=(None, None, "")))
     main = Mock(return_value=(None, None, ""))

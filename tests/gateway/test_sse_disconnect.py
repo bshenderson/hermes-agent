@@ -10,18 +10,18 @@ from gateway.platforms.api_server_openai_routes import _iter_stream_items
 @pytest.mark.asyncio
 async def test_silent_sse_disconnect_detection():
     """
-    Verify that a silent SSE stream (no items in queue) detects 
+    Verify that a silent SSE stream (no items in queue) detects
     client disconnect within 2 seconds, rather than waiting for the keepalive.
     """
     # Setup adapter and mock request/response
     adapter = APIServerAdapter(PlatformConfig(enabled=True, token='test-token'))
     interrupted = asyncio.Event()
-    
+
     # We need a real aiohttp server to test actual socket closure observation
     async def handler(request):
         from gateway.platforms.api_server import ThreadSafeAsyncQueue
         queue = ThreadSafeAsyncQueue()
-        
+
         # Synthetic agent task that just sleeps (silent)
         async def silent_agent():
             try:
@@ -32,7 +32,7 @@ async def test_silent_sse_disconnect_detection():
                 raise
 
         task = asyncio.create_task(silent_agent())
-        
+
         # Use the production writer logic
         return await adapter._write_sse_responses(
             request, 'diag', 'diag', 0, queue, task, [None], [], 'test',
@@ -52,16 +52,16 @@ async def test_silent_sse_disconnect_detection():
             # Start the request
             response = await session.post(f'http://127.0.0.1:{port}/v1/chat/completions', json={})
             assert response.status == 200
-            
+
             # Read first chunk to ensure connection is established
             await response.content.readany()
-            
+
             start_time = time.monotonic()
             # SILENT DISCONNECT: Close the client session immediately
             response.close()
-            
+
         await asyncio.wait_for(interrupted.wait(), timeout=2)
-        
+
     finally:
         await runner.cleanup()
 
@@ -74,7 +74,7 @@ async def test_silent_disconnect_interrupts_fast():
     async def handler(request):
         from gateway.platforms.api_server import ThreadSafeAsyncQueue
         queue = ThreadSafeAsyncQueue()
-        
+
         # Mock agent that signals when it is interrupted (cancelled)
         async def mock_agent():
             try:
@@ -84,7 +84,7 @@ async def test_silent_disconnect_interrupts_fast():
                 raise
 
         task = asyncio.create_task(mock_agent())
-        
+
         # The production writer calls _abandon_agent_task on disconnect
         return await adapter._write_sse_chat_completion(
             request, 'diag', 'diag', 0, queue, task, agent_ref=[None]
