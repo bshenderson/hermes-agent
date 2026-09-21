@@ -2189,6 +2189,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     """Invoke a single tool (agent-level or registry-dispatched) and return the result string;
     no display logic. Used by the concurrent path; the sequential path keeps its own inline
     invocation for display."""
+    if getattr(agent, "_preferred_web_required", False):
+        from agent.preferred_web_policy import dispatch_for_agent
+        return dispatch_for_agent(agent, function_name, function_args)
     from agent.inline_tool_executors import (
         InlineToolContext, emit_terminal_post_tool_call, resolve_invoke_tool_executor, tool_hook_ids
     )

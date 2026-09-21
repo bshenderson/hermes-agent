@@ -39,6 +39,7 @@ class ToolRoundVerdict:
     failed: Any
     _turn_exit_reason: Any
     truncated_tool_call_retries: Any
+    api_call_count: Any
     result: Optional[Dict[str, Any]] = None
 
 
@@ -60,7 +61,7 @@ def run_tool_round(
             action=action, messages=messages, conversation_history=conversation_history,
             active_system_prompt=active_system_prompt, compression_attempts=compression_attempts,
             final_response=final_response, failed=failed, _turn_exit_reason=_turn_exit_reason,
-            truncated_tool_call_retries=truncated_tool_call_retries, result=result,
+            truncated_tool_call_retries=truncated_tool_call_retries, api_call_count=api_call_count, result=result,
         )
 
     if not agent.quiet_mode:
@@ -161,9 +162,17 @@ def run_tool_round(
 
     if agent._tool_guardrail_halt_decision is not None:
         decision = agent._tool_guardrail_halt_decision
-        _turn_exit_reason = "guardrail_halt"
-        final_response = agent._toolguard_controlled_halt_response(decision)
-        agent._emit_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
+        if decision.code == "web_search_synthesis_redirect":
+            from agent.web_synthesis import synthesize_collected_web
+            final_response, completed, attempted = synthesize_collected_web(agent, messages, api_call_count)
+            api_call_count += int(attempted)
+            _turn_exit_reason = "web_synthesis_complete" if completed else "web_synthesis_unavailable"
+            failed = not completed
+            agent._emit_status("Search budget reached; completing from collected sources")
+        else:
+            _turn_exit_reason = "guardrail_halt"
+            final_response = agent._toolguard_controlled_halt_response(decision)
+            agent._emit_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
         append_message(messages, {"role": "assistant", "content": final_response})
         # Emit the halt so it isn't mistaken for a crash; the stream callback is still
         # alive, so SSE/TUI clients see the explanation.

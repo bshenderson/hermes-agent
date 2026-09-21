@@ -146,6 +146,17 @@ def _get_firecrawl_client() -> Any:
     managed fallback billed to Nous); never-configured → direct when present, else managed. Raises ValueError
     when the resolved path is unusable."""
     wt = _wt()
+    from hermes_cli.config import load_config_readonly
+    from tools.web_backend_policy import backend_policy_error
+    policy_config = load_config_readonly()
+    if "required_endpoints" in (policy_config.get("web") or {}):
+        # Pinned lanes cannot borrow the process-global SDK client across profiles.
+        direct = _get_direct_firecrawl_config()
+        direct_url = direct[1].get("api_url") if direct is not None else None
+        error = backend_policy_error("extract", policy_config, lambda _: direct_url)
+        if error or direct is None or direct[0] != "sdk":
+            raise ValueError("web_backend_unavailable: pinned extraction configuration rejected")
+        return Firecrawl(**direct[1])
     from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_error, selection_exists
     selected = read_selection("web")
     direct_config = _get_direct_firecrawl_config()

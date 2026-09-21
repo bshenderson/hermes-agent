@@ -269,6 +269,9 @@ def web_search_tool(query: str, limit: int = 5) -> str:
     Returns a JSON string ``{"success": bool, "data": {"web": [{"title", "url", "description", "position"},
     ...]}}`` (metadata only — use web_extract_tool for page content) or ``{"success": false, "error": ...}``.
     """
+    from tools.web_backend_policy import native_backend_guard
+    if blocked := native_backend_guard("search"):
+        return blocked
     try:
         limit = min(max(int(limit), 1), 100)
     except (TypeError, ValueError):
@@ -349,6 +352,9 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
     pointing at the stored full text; inline base64 images become ``[IMAGE: alt]``. URLs carrying secrets are
     refused before any fetch; private-network URLs are blocked per entry. Returns JSON ``{"results": [...]}``.
     """
+    from tools.web_backend_policy import native_backend_guard
+    if blocked := native_backend_guard("extract"):
+        return blocked
     normalized_urls, normalized_indices, invalid_urls, blocked = _validate_extract_urls(urls)
     if blocked is not None:
         return blocked

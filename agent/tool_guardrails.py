@@ -523,9 +523,10 @@ class ToolCallGuardrailController:
             code="web_search_synthesis_redirect",
             message=(
                 f"Skipped web_search: this turn already requested {count} web_search "
-                "calls. Stop broad searching. Use the search results already in the "
-                "transcript, call web_extract only for one specific source if full "
-                "text is essential, otherwise answer the user now."
+                "calls. Stop searching and do not call more tools. Answer the user's "
+                "request now using only collected sources; cite their URLs and clearly "
+                "distinguish search snippets from retrieved full text. State specific "
+                "gaps from failed or timed-out extractions. Do not invent missing facts."
             ),
             tool_name=tool_name,
             count=count,

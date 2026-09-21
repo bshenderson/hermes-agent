@@ -1216,8 +1216,12 @@ class AIAgent(
     _build_api_kwargs = _forward("agent.chat_completion_helpers", "build_api_kwargs")
 
     def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
-        """Record the first guardrail decision that should stop this turn."""
-        if decision.should_halt and self._tool_guardrail_halt_decision is None:
+        """Record a stop; a hard halt always dominates an answer-only redirect."""
+        current = self._tool_guardrail_halt_decision
+        if decision.should_halt and (
+            current is None
+            or (current.code == "web_search_synthesis_redirect" and decision.action == "halt")
+        ):
             self._tool_guardrail_halt_decision = decision
 
     def _toolguard_controlled_halt_response(self, decision: ToolGuardrailDecision) -> str:

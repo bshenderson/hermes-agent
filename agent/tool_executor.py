@@ -675,6 +675,9 @@ def _dispatch_authorized_once(
         agent._iters_since_skill = 0
 
     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
+    if getattr(agent, "_preferred_web_required", False):
+        from agent.preferred_web_policy import dispatch_for_agent
+        return _run_with_activity_heartbeat(agent, ref.name, lambda: dispatch_for_agent(agent, ref.name, ref.args))
     return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
 
 

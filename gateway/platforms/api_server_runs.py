@@ -468,7 +468,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
 
 
-def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server):
+def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server, observation=None):
     """Executor-thread body of one run; returns ``(result, usage)``."""
     from gateway.session_context import clear_session_vars
     from gateway.hosted_room_execution_policy import (
@@ -504,7 +504,9 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             # /v1/runs owns its agent lifecycle (no TurnRunner): record process ownership
             # so stop/cancel reaps only the background processes this run created.
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
-            r = agent.run_conversation(
+            from gateway.platforms.api_server_lifecycle_metrics import new_turn
+            observation = observation or new_turn(self, 'durable_run')
+            r = observation.run(agent.run_conversation,
                 user_message=run.user_message, conversation_history=run.conversation_history,
                 task_id=effective_task_id)
         finally:
@@ -551,6 +553,8 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
     """Drive one admitted run, publish its terminal event/status, release live state."""
     _redact_api_error_text = _api_server._redact_api_error_text
     run_id, loop = run.run_id, asyncio.get_running_loop()
+    from gateway.platforms.api_server_lifecycle_metrics import new_turn
+    observation = new_turn(self, 'durable_run')
 
     def _text_cb(delta: Optional[str]) -> None:
         if delta is None or run_id not in self._run_streams:
@@ -572,12 +576,14 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             return
         with self._profile_scope(run.request_profile):
             agent = self._create_agent(
-                stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
+                stream_delta_callback=observation.wrap_callback('text', _text_cb),
+                tool_progress_callback=observation.wrap_callback('tool', self._make_run_event_callback(run_id, loop)),
                 **run.agent_kwargs)
         self._active_run_agents[run_id] = agent
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         result, usage = await loop.run_in_executor(
-            None, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+            None, lambda: _run_agent_sync(self, run, agent, approval_notify,
+                                         _api_server=_api_server, observation=observation))
         if not isinstance(result, dict):
             result = {}
         if run_id in self._stopping_run_ids and result.get("interrupted") is True:

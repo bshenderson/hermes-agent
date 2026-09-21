@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - mirrors api_server's optional import
 # Logger parity with the origin module (moved log records keep their name).
 logger = logging.getLogger("gateway.platforms.api_server")
 
-async def _iter_stream_items(stream_q, agent_task, response):
+async def _iter_stream_items(stream_q, agent_task, response, request=None):
     """Yield agent stream items until EOS, writing SSE keepalives while idle.
 
     Yields the ``None`` sentinel once so callers can run EOS-only work; when ``agent_task``
@@ -35,9 +35,14 @@ async def _iter_stream_items(stream_q, agent_task, response):
 
     last_activity = time.monotonic()
     while True:
+        if request is not None:
+            transport = request.transport
+            if transport is None or transport.is_closing() is True:
+                raise ConnectionResetError("SSE client disconnected")
         try:
             item = await asyncio.wait_for(stream_q.get(), timeout=0.5)
         except asyncio.TimeoutError:
+
             if agent_task.done():
                 while True:
                     try:
@@ -427,6 +432,21 @@ class OpenAICompatRoutesMixin:
         if not messages or not isinstance(messages, list):
             return _invalid_request("Missing or invalid 'messages' field")
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        # GXTD-624: authenticate transient context before any prompt/session use.
+        from agent.chat_location import accept_context
+        from gateway.platforms.api_server import _api_request_profile
+        chat_location_turn = None
+        if "hermes_chat_context" in body:
+            if request.headers.get("Idempotency-Key"):
+                return _invalid_request("Turn-scoped chat location cannot use response-cache replay")
+            if request.headers.get("X-Hermes-Session-Id") or request.headers.get("X-Hermes-Session-Key"):
+                return _invalid_request("Conflicting chat session binding")
+            try:
+                chat_location_turn = accept_context(body["hermes_chat_context"], body=body,
+                    profile=_api_request_profile.get() or "default", key=self._expected_api_key())
+            except (ValueError, TypeError, KeyError):
+                return _invalid_request("Invalid turn-scoped chat context")
+            body.pop("hermes_chat_context", None)
 
         # System messages -> ephemeral system prompt layered ON TOP of core, flattened to text
         # (Anthropic rejects images there, OpenAI text models ignore them).
@@ -446,6 +466,19 @@ class OpenAICompatRoutesMixin:
                 conversation_messages.append({"role": role, "content": content})
         user_message: Any = (conversation_messages[-1].get("content", "") if conversation_messages else "")
         history = conversation_messages[:-1]
+        from agent.preferred_web_policy import admit, explicit, PolicyError
+        from gateway.platforms.api_server import _api_request_profile
+        from hermes_cli.config import load_config_readonly
+        preferred_web_policy = None
+        if explicit(user_message) or "preferred_web_mode" in body:
+            if not conversation_messages or conversation_messages[-1]["role"] != "user":
+                return _invalid_request("Research mode requires the current user request")
+            try:
+                config = load_config_readonly()
+                preferred_web_policy = admit(user_message, body.get("preferred_web_mode"),
+                    _api_request_profile.get(), (config.get("web") or {}).get("preferred_research_mode"))
+            except Exception:
+                return _invalid_request("research_mode_unavailable")
         if not _content_has_visible_payload(user_message):
             return _invalid_request("No user message found in messages")
 
@@ -485,6 +518,9 @@ class OpenAICompatRoutesMixin:
             first_user = next(
                 (cm.get("content", "") for cm in conversation_messages if cm.get("role") == "user"), "")
             session_id = _derive_chat_session_id(system_prompt, first_user)
+        if chat_location_turn is not None:
+            gateway_session_key = "chat-location:" + chat_location_turn.session_id
+            session_id = self._declared_conversation_session(gateway_session_key) or chat_location_turn.session_id
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
@@ -497,6 +533,14 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=history,
             ephemeral_system_prompt=system_prompt, session_id=session_id,
             gateway_session_key=gateway_session_key, **agent_overrides, route=route)
+        if preferred_web_policy is not None:
+            run_kwargs["preferred_web_policy"] = preferred_web_policy
+        if chat_location_turn is not None:
+            # /research retains its web-only restriction; never lend it location.
+            if preferred_web_policy is not None:
+                chat_location_turn.close()
+            run_kwargs["chat_location_turn"] = chat_location_turn
+            run_kwargs["bind_declared_conversation"] = True
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
             # tool_call_ids with an emitted "running": a "completed" without one (internal/
@@ -538,7 +582,7 @@ class OpenAICompatRoutesMixin:
             return await self._run_agent(**run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
-            fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream"],
+            fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream", "preferred_web_mode"],
         )
         if err is not None:
             return err
@@ -631,7 +675,7 @@ class OpenAICompatRoutesMixin:
                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}], **extra}
         try:
             await response.write(_sse_frame(_chunk({"role": "assistant"})))
-            async for delta in _iter_stream_items(stream_q, agent_task, response):
+            async for delta in _iter_stream_items(stream_q, agent_task, response, request):
                 if delta is None:
                     break
                 if isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_progress__":
@@ -696,7 +740,7 @@ class OpenAICompatRoutesMixin:
             instructions=instructions, conversation=conversation, store=store, session_id=session_id)
         try:
             await st.emit_created()
-            async for item in _iter_stream_items(stream_q, agent_task, response):
+            async for item in _iter_stream_items(stream_q, agent_task, response, request):
                 if item is None:  # EOS sentinel
                     st.cancel_batch_timer()
                     await st.flush_batch()
