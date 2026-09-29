@@ -347,6 +347,10 @@ class ToolCallGuardrailController:
         self._progress_since_failure: dict[ToolCallSignature, bool] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
+        # A direct tool reported by tool_describe is a terminal bridge result.
+        # Repeating the same describe call cannot reveal new schema and commonly
+        # traps weaker models in a bridge loop instead of invoking the listed tool.
+        self._terminal_describe_calls: dict[ToolCallSignature, tuple[str, ...]] = {}
         # Identical-call streak: CONSECUTIVE identical (tool, args, result) calls; any different call or
         # result resets it, so re-reads after edits and varied polling are never flagged.
         # Identical-call loop-breaker state (agent.stall_guards): tracks the CONSECUTIVE streak of identical
@@ -390,6 +394,16 @@ class ToolCallGuardrailController:
         cap_block = self._check_loop_cap(tool_name, args, signature)
         if cap_block is not None:
             return cap_block
+        direct_names = self._terminal_describe_calls.get(signature)
+        if self.config.hard_stop_enabled and direct_names:
+            listed = ", ".join(direct_names)
+            return self._decide(
+                "halt", "direct_tool_describe_retry_halt", tool_name, 2, signature,
+                message=(
+                    f"Stopped tool_describe: {listed} already resolved as directly-listed. "
+                    "Call it directly; do not describe it again or route it through tool_call."
+                ),
+            )
         synthesis_redirect = self._check_web_search_synthesis_redirect(tool_name, signature)
         if synthesis_redirect is not None:
             return synthesis_redirect
@@ -450,6 +464,16 @@ class ToolCallGuardrailController:
 
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
+        if tool_name == "tool_describe" and result:
+            try:
+                described = json.loads(result)
+            except (TypeError, json.JSONDecodeError):
+                described = {}
+            direct_names = described.get("direct_call_required") if isinstance(described, dict) else None
+            if isinstance(described, dict) and described.get("terminal_for_describe") is True and isinstance(direct_names, list):
+                names = tuple(str(name) for name in direct_names if str(name))
+                if names:
+                    self._terminal_describe_calls[signature] = names
         # A successful mutation is progress for every failing signature still counted
         # this turn. Pure loops never mutate between attempts, so the replay detector keeps its teeth.
         if tool_name in PROGRESS_RESET_TOOL_NAMES or file_mutation_result_landed(tool_name, result):

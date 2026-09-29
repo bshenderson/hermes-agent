@@ -463,6 +463,20 @@ class TestBatchedDescribe:
         )
         assert name not in result.get("not_found", [])
 
+    def test_repeated_direct_surface_describe_is_marked_terminal(self):
+        from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
+
+        name = "mq_desktop_direct_action"
+        tool_def = _register(name, "desktop_ui")
+        result = json.loads(dispatch_tool_describe(
+            {"names": [name]},
+            current_tool_defs=[tool_def],
+            config=ToolSearchConfig.from_raw({}),
+        ))
+
+        assert result["direct_call_required"] == [name]
+        assert result["terminal_for_describe"] is True
+
     def test_registry_lookup_failure_is_not_found(self, monkeypatch):
         from tools.registry import registry
         from tools.tool_search import ToolSearchConfig, dispatch_tool_describe

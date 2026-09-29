@@ -207,6 +207,26 @@ def test_mutating_or_unknown_tools_are_not_blocked_for_repeated_identical_succes
         assert controller.after_call("custom_tool", {"x": 1}, "ok", failed=False).action == "allow"
 
 
+def test_direct_tool_describe_retry_halts_after_first_terminal_result():
+    controller = ToolCallGuardrailController(ToolCallGuardrailConfig(hard_stop_enabled=True))
+    args = {"names": ["read_file"]}
+    result = json.dumps({
+        "tools": {},
+        "errors": {"read_file": "'read_file' is a directly-listed tool, not a deferred one."},
+        "direct_call_required": ["read_file"],
+        "terminal_for_describe": True,
+    })
+
+    assert controller.before_call("tool_describe", args).action == "allow"
+    controller.after_call("tool_describe", args, result, failed=False)
+    retry = controller.before_call("tool_describe", args)
+
+    assert retry.action == "halt"
+    assert retry.code == "direct_tool_describe_retry_halt"
+    assert "read_file" in retry.message
+    assert "Call it directly" in retry.message
+
+
 def test_identical_call_streak_halts_any_tool_when_hard_stop_enabled():
     # #89069 / #100849 bundle: a model replaying the same SUCCESSFUL
     # terminal/skill_view call with a byte-identical result is not covered by
