@@ -450,6 +450,8 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
         result["hint"] = "Names in not_found are not currently available. Re-run tool_search to refresh."
     if errors:
         result["errors"] = errors
+        result["direct_call_required"] = list(errors)
+        result["terminal_for_describe"] = True
     return json.dumps(result, ensure_ascii=False)
 
 
