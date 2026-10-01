@@ -155,21 +155,28 @@ def _batch_result(normalized: List[dict], answers: dict, timed_out: bool) -> str
 def _run_batch(normalized: List[dict], callback, question: str) -> str:
     """Dispatch a validated batch. Batch-capable callbacks (``questions`` kwarg) get the
     whole list once and reply ``{"answers": {qid: raw}, "timed_out"?}`` as a dict or JSON
-    string (the tui_gateway bridge only carries strings); any other falsy/unparseable reply
-    is a cancel-all (mirrors the single-question skip). Legacy callbacks are looped per
+    string (the tui_gateway bridge only carries strings). Cancel-all must return an explicit
+    empty answers map; malformed delivery is a protocol error, not a user skip. Legacy callbacks are looped per
     question: an empty answer is a skip, a timeout (``None`` or the sentinel) means the user
     walked away so the loop aborts instead of pestering them; earlier answers are kept."""
     answers: dict = {}
     timed_out = False
     if _accepts_kwarg(callback, "questions"):
         raw = callback(question, None, questions=normalized)
-        timed_out = _is_timeout(raw)
+        if _is_timeout(raw):
+            return _batch_result(normalized, {}, True)
         if isinstance(raw, str):
-            raw = _json_as(raw, dict)  # the sentinel is not JSON -> None, timed_out stays True
-        if isinstance(raw, dict):
-            answers = dict(raw.get("answers") or {})
-            timed_out = bool(raw.get("timed_out"))
-        return _batch_result(normalized, answers, timed_out)
+            raw = _json_as(raw, dict)
+        protocol_error = "Clarify delivery protocol failure: expected an answers object with valid question IDs and string answers. Do not interpret this as a user skip."
+        if not isinstance(raw, dict) or not isinstance(raw.get("answers"), dict):
+            return tool_error(protocol_error)
+        answers = raw["answers"]
+        qids = {entry["qid"] for entry in normalized}
+        if any(qid not in qids or not isinstance(answer, str) for qid, answer in answers.items()):
+            return tool_error(protocol_error)
+        if "timed_out" in raw and not isinstance(raw["timed_out"], bool):
+            return tool_error(protocol_error)
+        return _batch_result(normalized, answers, raw.get("timed_out", False))
     for entry in normalized:
         raw = _invoke_callback(callback, entry["question"], entry["choices"], entry["multi_select"])
         if _is_timeout(raw):

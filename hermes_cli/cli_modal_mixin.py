@@ -699,8 +699,8 @@ class CLIModalMixin:
     def _clarify_callback_batch(self, questions):
         """Batch clarify panel (A-compact): all questions, one active. Returns
         ``{"answers": {qid: raw}}`` when every question is locked, plus ``"timed_out": True`` when
-        the deadline expires with partial answers; a cancel string passes through unchanged so the
-        tool core resolves the batch empty."""
+        the deadline expires with partial answers; deliberate cancellation returns an empty
+        answers envelope. Arbitrary malformed callback strings remain protocol failures."""
         from cli import CLI_CONFIG, _DIM, _RST, _cprint
         from tools.clarify_gateway import resolve_clarify_timeout
 
@@ -727,6 +727,8 @@ class CLIModalMixin:
         result = self._poll_modal_queue(response_queue, "_clarify_deadline")
         if result is not _TIMED_OUT:
             self._clarify_deadline = None
+            if result == "":
+                return {"answers": {}}
             return {"answers": result} if isinstance(result, dict) else result
         partial = dict(state["answers"])
         self._clarify_teardown()
@@ -894,7 +896,10 @@ class CLIModalMixin:
             _put(self._approval_state, "deny")
             self._approval_state = None
         if self._clarify_state:
-            _put(self._clarify_state, "The user cancelled. Use your best judgement to proceed.")
+            # Batch cancellation is an explicit empty answers map; single-question
+            # callers retain their historical cancellation text.
+            cancel = {} if self._clarify_state.get("questions") else "The user cancelled. Use your best judgement to proceed."
+            _put(self._clarify_state, cancel)
             self._clarify_state = None
             self._clarify_freetext = False
             self._clarify_multi_base = None

@@ -571,10 +571,10 @@ class TestClarifyBatchDispatch:
         assert result["responses"][0]["user_response"] == "kept"
         assert result["responses"][1]["user_response"] == ""
 
-    def test_batch_empty_response_is_skip_not_timeout(self):
-        """A cancel-all resolves every answer empty with no timed_out flag."""
+    def test_batch_explicit_skip_is_not_timeout(self):
+        """A valid cancel-all envelope resolves blanks with no timed_out flag."""
         def cb(question, choices, multi_select=False, questions=None):
-            return ""
+            return {"answers": {}}
 
         result = json.loads(clarify_tool(
             "", questions=[{"question": "One?"}], callback=cb,

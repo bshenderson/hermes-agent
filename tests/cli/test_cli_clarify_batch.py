@@ -14,6 +14,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from cli import HermesCLI
+from tools.clarify_tool import clarify_tool
 
 
 def _make_cli_stub():
@@ -58,6 +59,66 @@ def _start_batch(cli, questions):
 
 
 class TestClarifyBatchPanel:
+    def test_actual_interrupt_cancels_batch_without_protocol_error(self):
+        for lock_first in (False, True):
+            cli = _make_cli_stub()
+            cli._approval_state = None
+            cli._sudo_state = None
+            cli._secret_state = None
+            result = {}
+
+            def invoke():
+                result["value"] = json.loads(clarify_tool(
+                    "", questions=[{"question": "One?"}, {"question": "Two?"}],
+                    callback=cli._clarify_callback))
+
+            thread = threading.Thread(target=invoke, daemon=True)
+            thread.start()
+            deadline = time.monotonic() + 2
+            while cli._clarify_state is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            state = cli._clarify_state
+            assert state is not None
+            if lock_first:
+                cli._clarify_batch_lock(state, "discarded on cancel-all")
+            cli._clear_active_overlays_for_interrupt()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+            assert "error" not in result["value"]
+            assert [row["user_response"] for row in result["value"]["responses"]] == ["", ""]
+            assert "timed_out" not in result["value"]
+
+    def test_actual_interrupt_preserves_single_cancellation_text(self):
+        cli = _make_cli_stub()
+        cli._approval_state = None
+        cli._sudo_state = None
+        cli._secret_state = None
+        result = {}
+
+        def invoke():
+            result["value"] = cli._clarify_callback("One?", None)
+
+        thread = threading.Thread(target=invoke, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while cli._clarify_state is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert cli._clarify_state is not None
+        cli._clear_active_overlays_for_interrupt()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert result["value"] == "The user cancelled. Use your best judgement to proceed."
+
+    def test_explicit_cancel_returns_valid_empty_envelope(self):
+        cli = _make_cli_stub()
+        thread, result = _start_batch(cli, [_q(0, "One?")])
+        state = cli._clarify_state
+        assert state is not None
+        state["response_queue"].put("")
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert result["value"] == {"answers": {}}
+
     def test_all_locked_returns_answers_dict_keyed_by_qid(self):
         cli = _make_cli_stub()
         questions = [

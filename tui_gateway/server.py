@@ -1259,9 +1259,10 @@ def _block(event: str, sid: str, payload: dict, timeout: float | None = 300, bat
                 batch_answers = dict(batch_state["answers"])
     expire = lambda: _emit(f"{event.removesuffix('.request')}.expire", sid, {"request_id": rid})
     if batch_qids is not None:
-        # Cancel-all (respond with no question_id) resolves via _answers with "" — a plain cancel, not a partial result.
+        # Explicit cancel-all resolves via _answers; retain a valid batch envelope
+        # so the tool can distinguish cancellation from malformed callback delivery.
         if answer_present:
-            return answer
+            return json.dumps({"answers": {}}, ensure_ascii=False) if answer == "" else answer
         result: dict[str, object] = {"answers": batch_answers or {}}
         if not answered:
             # Deadline hit: keep what was locked, report the rest as absences (not skips), still expire live cards.

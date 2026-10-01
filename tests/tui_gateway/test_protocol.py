@@ -494,7 +494,7 @@ def test_clarify_batch_cancel_all_returns_empty(server):
     })
 
     thread.join(timeout=5)
-    assert box["answer"] == ""
+    assert json.loads(box["answer"]) == {"answers": {}}
 
 
 def test_clarify_batch_late_question_respond_is_idempotent(server):
