@@ -654,7 +654,7 @@ class CLIModelSwitchMixin:
                 return
             if 0 <= selected < back_idx:
                 result = _switch_model_from(
-                    self, visible_labels[selected], is_global=persist_global,
+                    self, model_list[filtered_pairs[selected][0]], is_global=persist_global,
                     explicit_provider=provider_data.get("slug"),
                     user_providers=state.get("user_provs"),
                     custom_providers=state.get("custom_provs"))

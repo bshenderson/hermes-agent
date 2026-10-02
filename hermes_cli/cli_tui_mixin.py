@@ -637,7 +637,11 @@ class CLITuiMixin:
             # Fuzzy filter narrows the concrete list; selection still resolves to a real entry via
             # the filtered_pairs index mapping, so this never makes model resolution ambiguous.
             _query = state.get("filter", "") or ""
-            filtered_pairs = self._filter_model_picker_entries(model_list, _query)
+            labels = provider_data.get("model_labels") or {}
+            # Filter on the visible human label, but retain original row indices
+            # so selecting a label always sends the corresponding wire model ID.
+            visible_models = [labels.get(model_id, model_id) for model_id in model_list]
+            filtered_pairs = self._filter_model_picker_entries(visible_models, _query)
             state["_filtered_pairs"] = filtered_pairs
             model_labels = [e for (_i, e) in filtered_pairs]
             choices = list(model_labels) + ["← Back", "Cancel"]

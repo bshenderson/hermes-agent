@@ -835,6 +835,32 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
         api_url = _entry_base_url(ep_cfg, ("base_url", "api", "url"))
         inline_api_key, key_env, cred_identity = _entry_credentials(ep_cfg, "key_env", "api_key_env")
         headers = _extra_headers_from_config(ep_cfg)
+        if "picker_models" in ep_cfg:
+            # Curated surfaces own their identity even when several providers share
+            # one admission endpoint. Empty maps hide capability-only providers;
+            # defaults and current selections must not leak back into this list.
+            from hermes_cli.model_switch import _declared_model_ids
+            picker_spec = ep_cfg.get("picker_models")
+            models = _declared_model_ids(picker_spec)
+            if not models:
+                b.seen_slugs.add(ep_name.lower())
+                b.record_section3_pair(display_name, _norm_url(api_url))
+                continue
+            labels = {}
+            metadata = ep_cfg.get("models") or {}
+            for model_id in models:
+                meta = picker_spec.get(model_id) if isinstance(picker_spec, dict) else None
+                if not isinstance(meta, dict):
+                    meta = metadata.get(model_id) if isinstance(metadata, dict) else None
+                if isinstance(meta, dict) and meta.get("display_name"):
+                    labels[model_id] = str(meta["display_name"])
+            aliases = {str(alias).lower() for alias in custom_provider_aliases(display_name, str(ep_name))}
+            is_current = b.endpoint_is_current(ep_name, aliases, _norm_url(api_url), url_match_ok=False)
+            b.add_endpoint_row(ep_name, display_name, api_url, models, is_current, False)
+            b.results[-1].update(model_labels=labels, picker_models_explicit=True)
+            b.seen_slugs.update(aliases)
+            b.record_section3_pair(display_name, _norm_url(api_url))
+            continue
         group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())))
 
         if group_key not in ep_groups:
@@ -1107,7 +1133,7 @@ def _finalize_picker_rows(results: list, user_providers, current_model: str) -> 
     # provider's row.
     if current_model:
         for row in results:
-            if not row.get("is_current") or row.get("native_catalog_empty"):
+            if not row.get("is_current") or row.get("native_catalog_empty") or row.get("picker_models_explicit"):
                 continue
             models = row.get("models") or []
             if current_model not in models:
