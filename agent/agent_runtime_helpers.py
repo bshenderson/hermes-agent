@@ -893,6 +893,8 @@ def _apply_primary_runtime_fields(agent, rt: Dict[str, Any]) -> None:
     agent._reasoning_echo_flag = rt.get("reasoning_echo_flag", False)
     agent.request_overrides = dict(rt.get("request_overrides") or {})
     agent._client_kwargs = dict(rt["client_kwargs"])
+    agent.max_tokens = rt.get("max_tokens", getattr(agent, "_explicit_max_tokens", None))
+    agent._ephemeral_max_output_tokens = None
 
 
 def _build_anthropic_client_from_runtime(agent, rt: Dict[str, Any]) -> None:
@@ -1157,6 +1159,8 @@ def restore_primary_runtime(agent) -> bool:
             agent._use_prompt_caching = False
             agent._use_native_cache_layout = False
         _rebuild_primary_client(agent, rt, reason="restore_primary")
+        from agent.output_limits import update_compressor_output_limit
+        update_compressor_output_limit(agent)
         agent.context_compressor.update_model(
             model=rt["compressor_model"], context_length=rt["compressor_context_length"],
             base_url=rt["compressor_base_url"], api_key=rt["compressor_api_key"],
@@ -1786,6 +1790,7 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
 # Pool reload is part of the switch and must be reversible on rollback, hence the pool fields.
 _SWITCH_SNAPSHOT_FIELDS = (
     "model", "provider", "requested_provider", "base_url", "api_mode", "api_key", "client",
+    "max_tokens", "_ephemeral_max_output_tokens",
     "_anthropic_client", "_anthropic_api_key", "_anthropic_base_url", "_is_anthropic_oauth",
     "_config_context_length", "_reasoning_echo_flag", "runtime_capabilities",
     "_credential_pool", "_credential_pool_entry_id",
@@ -1800,11 +1805,24 @@ def _snapshot_switch_state(agent) -> Dict[str, Any]:
     snapshot = {name: getattr(agent, name, _MISSING) for name in _SWITCH_SNAPSHOT_FIELDS}
     # Shallow-copy the dict so mutating the live one doesn't poison the rollback target.
     snapshot["_client_kwargs"] = dict(getattr(agent, "_client_kwargs", {}) or {})
+    cc = getattr(agent, "context_compressor", None)
+    snapshot["_compressor_output_state"] = {
+        name: getattr(cc, name) for name in (
+            "model", "context_length", "base_url", "api_key", "provider", "api_mode",
+            "max_tokens", "threshold_tokens",
+        ) if cc is not None and hasattr(cc, name)
+    }
     return snapshot
 
 
 def _restore_switch_snapshot(agent, snapshot: Dict[str, Any]) -> None:
     for name, value in snapshot.items():
+        if name == "_compressor_output_state":
+            cc = getattr(agent, "context_compressor", None)
+            if cc is not None:
+                for attr, saved in value.items():
+                    setattr(cc, attr, saved)
+            continue
         if value is _MISSING:
             continue  # attribute did not exist before the swap; don't fabricate it
         with contextlib.suppress(Exception):
@@ -2008,6 +2026,8 @@ def _update_switch_compressor(agent, custom_providers, effective_context_length,
             agent.model, base_url=agent.base_url, api_key=ctx_api_key, provider=agent.provider,
             config_context_length=effective_context_length, custom_providers=custom_providers,
         )
+        from agent.output_limits import update_compressor_output_limit
+        update_compressor_output_limit(agent)
         agent.context_compressor.update_model(
             model=agent.model,
             context_length=new_context_length,
@@ -2026,6 +2046,7 @@ def _build_primary_runtime_snapshot(agent, api_mode) -> Dict[str, Any]:
     cc = getattr(agent, "context_compressor", None) or None
     rt = {
         "model": agent.model,
+        "max_tokens": getattr(agent, "max_tokens", None),
         "provider": agent.provider,
         "requested_provider": agent.requested_provider,
         "base_url": agent.base_url,
@@ -2122,6 +2143,8 @@ def switch_model(
         _swap_switch_runtime(
             agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm
         )
+        from agent.output_limits import apply_output_limit
+        apply_output_limit(agent)
     except Exception:
         _restore_switch_snapshot(agent, snapshot)
         raise

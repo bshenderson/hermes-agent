@@ -1681,6 +1681,8 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
                 "must be a positive integer (e.g. 4096)", "provider default",
             )
     agent._session_init_model_config["max_tokens"] = agent.max_tokens
+    from agent.output_limits import apply_output_limit
+    apply_output_limit(agent, _agent_cfg)
 
     _config_context_length = _model_section.get("context_length")
     if _config_context_length is not None:
@@ -2081,6 +2083,7 @@ def _snapshot_primary_runtime(agent):
     _cc = agent.context_compressor
     agent._primary_runtime = {
         "model": agent.model,
+        "max_tokens": agent.max_tokens,
         "provider": agent.provider,
         "requested_provider": agent.requested_provider,
         "base_url": agent.base_url,
@@ -2223,6 +2226,7 @@ def init_agent(
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:
         setattr(agent, _name, _params[_name])
+    agent._explicit_max_tokens = max_tokens
     for _name in _GATEWAY_IDENTITY_PARAMS:
         setattr(agent, f"_{_name}", _params[_name])
     # Shared iteration budget: parent creates, children inherit.

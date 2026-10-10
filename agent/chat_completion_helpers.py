@@ -1962,6 +1962,8 @@ def _update_fallback_context_compressor(agent) -> None:
         config_context_length=getattr(agent, "_config_context_length", None),
         custom_providers=getattr(agent, "_custom_providers", None),
     )
+    from agent.output_limits import update_compressor_output_limit
+    update_compressor_output_limit(agent)
     compressor.update_model(  # callable api_key preserved → call_llm
         model=agent.model, context_length=fb_context_length, base_url=agent.base_url,
         api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
@@ -2073,6 +2075,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent._config_context_length = None
         agent.model, agent.provider, agent.requested_provider = fb_model, fb_provider, fb_provider
         agent.base_url, agent.api_mode = fb_base_url, fb_api_mode
+        from agent.output_limits import apply_output_limit
+        apply_output_limit(agent)
         # reasoning_content echo opt-in travels with the active provider; restore_primary_runtime reverts it.
         agent._reasoning_echo_flag = bool(fb.get("reasoning_echo", False))
         if hasattr(agent, "_transport_cache"):
