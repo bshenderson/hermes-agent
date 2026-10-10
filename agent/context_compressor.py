@@ -3514,10 +3514,8 @@ class ContextCompressor(
             args = args[:self._TOOL_ARGS_HEAD] + "..."
         return f"  {fn.get('name', '?')}({args})"
 
-    def _serialize_for_summary(self, turns: List[Dict[str, Any]], *, lossless: bool | None = None) -> str:
-        """Serialize turns into labeled, redacted text for the summarizer."""
-        if lossless is None:
-            lossless = bool(lossless_settings())
+    def _serialize_records_for_summary(self, turns: list[dict[str, Any]], *, lossless: bool = False) -> list[str]:
+        """Serialize labeled, redacted records; lossless mode preserves each complete body."""
         # Lazy import: agent_runtime_helpers pulls heavy transitive imports.
         from agent.agent_runtime_helpers import strip_think_blocks
         parts = []
@@ -3541,9 +3539,11 @@ class ContextCompressor(
             parts.append(f"[{role.upper()}]: {content}")
         return parts
 
-    def _serialize_for_summary(self, turns: list[dict[str, Any]]) -> str:
+    def _serialize_for_summary(self, turns: list[dict[str, Any]], *, lossless: bool | None = None) -> str:
         """Serialize turns into labeled, redacted text for the summarizer."""
-        return "\n\n".join(self._serialize_records_for_summary(turns))
+        if lossless is None:
+            lossless = bool(lossless_settings())
+        return "\n\n".join(self._serialize_records_for_summary(turns, lossless=lossless))
 
     def _fallback_anchors(self, turns_to_summarize: list[dict[str, Any]]) -> dict[str, list[str]]:
         """Locally extractable anchors: user asks, actions, files, blockers, last dropped turns."""
@@ -3932,7 +3932,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if self.summary_model:
             call_kwargs["model"] = self.summary_model
         # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
-        call_kwargs.update(_pinned_summary_call_kwargs())
+        self._apply_summary_route(call_kwargs, _pinned_summary_call_kwargs())
         # Compression is atomic: protect the in-flight summary call from a mid-turn gateway interrupt.
         # Without this, an incoming user message aborts the summary and compression falls back to a degraded
         # static marker, losing the real handoff (#23975). Re-entrant: a main-model retry (_generate_summary
@@ -4053,8 +4053,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                     ),
                 )
             else:
-                bound = self._sample_summary_input if getattr(self, "tail_mode", "lean") == "lean" else self._bound_summary_input
-                content = self._call_summary_llm(build(bound(self._serialize_for_summary(turns_to_summarize))), prompt_started_at)
+                if getattr(self, "tail_mode", "lean") == "lean":
+                    records = self._serialize_records_for_summary(turns_to_summarize)
+                    content_to_summarize, coverage = self._sample_summary_records(records)
+                    self._record_summary_input_coverage(coverage)
+                else:
+                    content_to_summarize = self._bound_summary_input(
+                        self._serialize_for_summary(turns_to_summarize, lossless=False)
+                    )
+                content = self._call_summary_llm(build(content_to_summarize), prompt_started_at)
             # Strip <think> blocks: they would be stored, injected, and compounded on every iterative update.
             from agent.agent_runtime_helpers import strip_think_blocks
             content = strip_think_blocks(None, content).strip() or content
