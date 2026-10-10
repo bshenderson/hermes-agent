@@ -355,10 +355,10 @@ class TestClarifyBatchDispatch:
         assert result["responses"][1]["status"] == "unanswered"
         assert result["responses"][1]["user_response"] is None
 
-    def test_batch_explicit_skip_is_not_timeout(self):
-        """A valid cancel-all envelope resolves blanks with no timed_out flag."""
-        def cb(question, choices, multi_select=False, questions=None):
-            return {"answers": {}}
+    def test_batch_skipped_is_not_unanswered(self):
+        """A question locked empty is skipped; a missing one is unanswered."""
+        def cb(questions):
+            return _reply({"q0": None})
 
         result = _ask(cb, [{"question": "One?"}, {"question": "Two?"}])
         assert [r["status"] for r in result["responses"]] == ["skipped", "unanswered"]

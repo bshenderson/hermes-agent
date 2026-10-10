@@ -1324,7 +1324,7 @@ def get_runtime(*, create: bool = True, profile_key: str | None = None) -> Relay
 
 def current_profile_key() -> str:
     """Return the canonical profile identity used for runtime isolation."""
-    home = get_hermes_home().expanduser()
+    home = Path(get_hermes_home()).expanduser()
     if not home.is_absolute():
         return str(home.resolve())
     return _PROFILE_KEY_CACHE.get(str(home)) or _PROFILE_KEY_CACHE.setdefault(str(home), str(home.resolve()))

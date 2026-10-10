@@ -1,6 +1,7 @@
 """Route-scoped reservations must follow identity, never leak across swaps."""
 
-import yaml
+import json
+
 import pytest
 from openai import OpenAI
 from run_agent import AIAgent
@@ -19,7 +20,7 @@ def configure(tmp_path, monkeypatch):
         'compression': {'threshold': .85}, 'memory': {'memory_enabled': False},
         'auxiliary': {'compression': {'provider': 'auto', 'model': ''}},
     }
-    (tmp_path / 'config.yaml').write_text(yaml.safe_dump(config))
+    (tmp_path / 'config.yaml').write_text(json.dumps(config))
     return config
 
 
@@ -97,6 +98,6 @@ def test_explicit_precedence_fallback_restore_and_rollback(tmp_path, monkeypatch
     assert agent.context_compressor.threshold_tokens == 69632
     # A missing profile setting must not borrow the default profile's reservation.
     config['providers']['llamacpp-main']['models'][QWEN].pop('max_tokens')
-    (tmp_path / 'config.yaml').write_text(yaml.safe_dump(config))
+    (tmp_path / 'config.yaml').write_text(json.dumps(config))
     other_profile_agent = make_agent(QWEN, 'custom', LOCAL)
     assert_limit(other_profile_agent, None)

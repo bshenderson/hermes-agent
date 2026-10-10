@@ -2,8 +2,8 @@
 import threading
 
 from agent.interrupt_control import InterruptControlMixin
-from tests.cli.test_cli_init import _make_cli
-from tests.cli.test_manual_compress import _make_history
+from tests.hermes_cli.test_cli_init import _make_cli
+from tests.hermes_cli.test_manual_compress import _make_history
 
 
 class InterruptAgent(InterruptControlMixin):

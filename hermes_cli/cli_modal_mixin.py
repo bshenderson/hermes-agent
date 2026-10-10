@@ -996,11 +996,11 @@ class CLIModalMixin:
         self._clarify_freetext = True
         self._clarify_prefill = meta.get("other_text") or "" if meta.get("kind") == "other" else ""
 
-    def _clarify_callback_batch(self, questions):
-        """Batch clarify panel (A-compact): all questions, one active. Returns
-        ``{"answers": {qid: raw}}`` when every question is locked, plus ``"timed_out": True`` when
-        the deadline expires with partial answers; deliberate cancellation returns an empty
-        answers envelope. Arbitrary malformed callback strings remain protocol failures."""
+    def _clarify_callback(self, questions):
+        """Clarify-tool platform callback (agent thread, #18450): the batch panel (A-compact) shows
+        all questions, one active, and blocks until the key bindings lock every answer. Returns
+        ``{"answers": {qid: raw | None}, "outcome"}`` (None = skipped): ``submitted`` when every
+        question is locked, ``timed_out`` when the deadline expires, ``cancelled`` on an interrupt."""
         from cli import CLI_CONFIG, _DIM, _RST, _cprint
         from tools.clarify_gateway import resolve_clarify_timeout
 
@@ -1027,9 +1027,8 @@ class CLIModalMixin:
         result = self._poll_modal_queue(response_queue, "_clarify_deadline")
         if result is not _TIMED_OUT:
             self._clarify_deadline = None
-            if result == "":
-                return {"answers": {}}
-            return {"answers": result} if isinstance(result, dict) else result
+            outcome = "cancelled" if result is None else "submitted"
+            return {"answers": dict(state["answers"]), "outcome": outcome}
         partial = dict(state["answers"])
         self._clarify_teardown()
         _cprint(f"\n{_DIM}{t('cli.clarify.timed_out_locked_answers', timeout=timeout)}{_RST}")
@@ -1262,10 +1261,7 @@ class CLIModalMixin:
         if self._connection_state:
             self._connection_interrupt()
         if self._clarify_state:
-            # Batch cancellation is an explicit empty answers map; single-question
-            # callers retain their historical cancellation text.
-            cancel = {} if self._clarify_state.get("questions") else "The user cancelled. Use your best judgement to proceed."
-            _put(self._clarify_state, cancel)
+            _put(self._clarify_state, None)
             self._clarify_state = None
             self._clarify_freetext = False
             self._clarify_multi_base = None

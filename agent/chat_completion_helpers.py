@@ -2014,6 +2014,9 @@ def _update_fallback_context_compressor(agent) -> None:
         model=agent.model, context_length=fb_context_length, base_url=agent.base_url,
         api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
     )
+    update_compressor_output_limit(agent)
+    with contextlib.suppress(Exception):
+        compressor._apply_threshold_tokens_cap()
     # Fallback activation is an error path: refresh an EXISTING verdict eagerly (the ceiling was voided by
     # update_model()), but a session that never probed keeps its lazy compaction-time probe rather than
     # resolving an auxiliary client while the primary route is failing (#114707).
@@ -2103,61 +2106,36 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
             old_model, old_provider = bound
             fb_model = agent.model  # normalized by the binder
             rewrite_prompt_model_identity(agent, fb_model, fb_provider)
+            from agent.output_limits import apply_output_limit
+            apply_output_limit(agent)
+            _update_fallback_context_compressor(agent)
 
-        fb_base_url = str(fb_client.base_url)
-        if not fb_api_mode_explicit and fb_api_mode == "chat_completions":
-            fb_api_mode = _fallback_api_mode_resolved(agent, fb_provider, fb_model, fb_base_url)
-
-        old_model, old_provider, old_base_url = agent.model, agent.provider, agent.base_url
-
-        # Clear the per-config context_length override so the fallback model's own context
-        # window is resolved instead of the previous model's stale value.
-        # See #22387.
-        agent._config_context_length = None
-        agent.model, agent.provider, agent.requested_provider = fb_model, fb_provider, fb_provider
-        agent.base_url, agent.api_mode = fb_base_url, fb_api_mode
-        from agent.output_limits import apply_output_limit
-        apply_output_limit(agent)
-        # reasoning_content echo opt-in travels with the active provider; restore_primary_runtime reverts it.
-        agent._reasoning_echo_flag = bool(fb.get("reasoning_echo", False))
-        if hasattr(agent, "_transport_cache"):
-            agent._transport_cache.clear()
-        agent._fallback_activated = True
-
-        _rebind_fallback_credential_pool(agent, fb_provider, fb_model)
-        _swap_fallback_clients(agent, fb_client, fb_provider, fb_model, fb_base_url, fb_api_mode)
-
-        from agent.agent_runtime_helpers import sync_credential_pool_entry_id
-        sync_credential_pool_entry_id(agent)
-
-        agent._use_prompt_caching, agent._use_native_cache_layout = agent._anthropic_prompt_cache_policy(
-            provider=fb_provider, base_url=fb_base_url, api_mode=fb_api_mode, model=fb_model)
-        agent._ensure_lmstudio_runtime_loaded()  # LM Studio: preload before probing context length
-        _update_fallback_context_compressor(agent)
-        _reresolve_fallback_reasoning_config(agent)
-        _rescope_fallback_extra_body(agent, old_model, old_provider, old_base_url)
-        rewrite_prompt_model_identity(agent, fb_model, fb_provider)
-
-        _buffer_fallback_notice(agent, (
-            f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
-            f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}."))
-        # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
-        # provenance so the restore path only emits a recovery notice after a real fallback.
-        agent._provider_fallback_active = True
-        agent._provider_fallback_route = (str(fb_model), str(fb_provider))
-        logger.info("Fallback activated: %s → %s (%s)", old_model, fb_model, fb_provider)
-        # The stale-call streak measured the OLD provider; carrying it over would
-        # short-circuit the fresh fallback before its first stream attempt.
-        _reset_stale_streak(agent)
-        from agent.native_compaction import resolve_native_compaction_capabilities
-        agent.runtime_capabilities = resolve_native_compaction_capabilities(
-            model=agent.model, base_url=agent.base_url, provider=fb_provider, is_codex_backend=fb_provider == "openai-codex")
-        return True
-    except Exception as e:
-        if fb_provider == "nous":
-            unavailable.add(fb_key)
-        logger.error("Failed to activate fallback %s: %s", fb_model, e)
-        return agent._try_activate_fallback(reason)  # try next in chain
+            notice = (
+                f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
+                f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}.")
+            if cooldown_seconds is not None:
+                remaining = max(0, math.ceil(agent._rate_limited_until - time.monotonic()))
+                notice += f" Primary retry eligible in ~{remaining} s; recovery is not guaranteed."
+            _buffer_fallback_notice(agent, notice)
+            # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
+            # provenance so the restore path only emits a recovery notice after a real fallback.
+            agent._provider_fallback_active = True
+            agent._provider_fallback_route = (str(fb_model), str(fb_provider))
+            _log_fallback_activated(agent, reason, old_model, old_provider, fb_model, fb_provider)
+            from hermes_cli.observability.shared_metrics_events import record_fallback
+            record_fallback(from_provider=old_provider, to_provider=fb_provider, reason=reason)
+            # The stale-call streak measured the OLD provider; carrying it over would
+            # short-circuit the fresh fallback before its first stream attempt.
+            _reset_stale_streak(agent)
+            from agent.native_compaction import resolve_native_compaction_capabilities
+            agent.runtime_capabilities = resolve_native_compaction_capabilities(
+                model=agent.model, base_url=agent.base_url, provider=fb_provider, is_codex_backend=fb_provider == "openai-codex")
+            return True
+        except Exception as e:
+            if fb_provider == "nous":
+                unavailable.add(fb_key)
+            logger.error("Failed to activate fallback %s: %s", fb_model, e)
+            continue  # try next in chain
 
 
 # Keys outside the Chat Completions schema that strict gateways (Fireworks-backed OpenCode

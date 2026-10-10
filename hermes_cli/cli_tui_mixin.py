@@ -636,11 +636,7 @@ class CLITuiMixin:
             # Fuzzy filter narrows the concrete list; selection still resolves to a real entry via
             # the filtered_pairs index mapping, so this never makes model resolution ambiguous.
             _query = state.get("filter", "") or ""
-            labels = provider_data.get("model_labels") or {}
-            # Filter on the visible human label, but retain original row indices
-            # so selecting a label always sends the corresponding wire model ID.
-            visible_models = [labels.get(model_id, model_id) for model_id in model_list]
-            filtered_pairs = self._filter_model_picker_entries(visible_models, _query)
+            filtered_pairs = self._filter_model_picker_entries(model_list, _query)
             state["_filtered_pairs"] = filtered_pairs
             model_labels = [e for (_i, e) in filtered_pairs]
             choices = list(model_labels) + [t("cli.shared.back"), t("cli.shared.cancel")]
@@ -967,18 +963,16 @@ class CLITuiMixin:
             ("_command_palette_state", self._close_command_palette))):
             return
         overlay_cleared = self._tui_clear_blocking_overlays(event)
-        active_work = (self._agent_running or self._command_running) and self.agent
-        if overlay_cleared and not active_work:
+        if overlay_cleared and not (self._agent_running and self.agent):
             return
-        if active_work:
+        if self._agent_running and self.agent:
             if now - self._last_ctrl_c_time < 2.0:
                 print("\n" + t("cli.tui.force_exiting"))
                 self._should_exit = True
                 event.app.exit()
                 return
             self._last_ctrl_c_time = now
-            label = "command" if self._command_running and not self._agent_running else "agent"
-            print(f"\n⚡ Interrupting {label}... (press Ctrl+C again to force exit)")
+            print("\n" + t("cli.tui.interrupting_again_hint"))
             request_hard_interrupt(self.agent)
         else:
             self._tui_clear_or_exit(event)
@@ -992,11 +986,10 @@ class CLITuiMixin:
             ("_model_picker_state", self._close_model_picker))):
             return
         overlay_cleared = self._tui_clear_blocking_overlays(event)
-        active_work = (self._agent_running or self._command_running) and self.agent
-        if overlay_cleared and not active_work:
+        if overlay_cleared and not (self._agent_running and self.agent):
             return
-        if active_work:
-            print("\n⚡ Interrupting command...")
+        if self._agent_running and self.agent:
+            print("\n" + t("cli.tui.interrupting"))
             request_hard_interrupt(self.agent)
         else:
             self._tui_clear_or_exit(event)

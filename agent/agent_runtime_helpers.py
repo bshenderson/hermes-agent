@@ -1490,8 +1490,9 @@ def restore_primary_runtime(agent) -> bool:
             base_url=rt["compressor_base_url"], api_key=rt["compressor_api_key"],
             provider=rt["compressor_provider"], api_mode=rt.get("compressor_api_mode", ""),
         )
+        update_compressor_output_limit(agent)
         _rebind_primary_credential_pool(
-            agent, primary_provider, _matches_primary, _load_primary_pool, prefetched_pool, prefetched
+            agent, primary_provider, primary_model, _matches_primary, _load_primary_pool, prefetched_pool, prefetched
         )
         # Older snapshots have no reasoning_config; keep the current value.
         saved_reasoning = rt.get("reasoning_config")

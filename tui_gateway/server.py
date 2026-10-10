@@ -1404,47 +1404,6 @@ def _ask(method: str, sid: str, params: dict, timeout: float | None = 300) -> st
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
-def _block(event: str, sid: str, payload: dict, timeout: float | None = 300, batch_qids: list[str] | None = None) -> str:
-    rid = uuid.uuid4().hex[:8]
-    ev = threading.Event()
-    with _prompt_lock:
-        _pending[rid] = (sid, ev)
-        payload["request_id"] = rid
-        _pending_prompt_payloads[rid] = (event, dict(payload))
-        if batch_qids:
-            # Multi-question clarify: per-question answers accumulate here (update-in-place until every
-            # qid is locked); locked answers survive a timeout — see the batch read-out below.
-            _batch_clarify[rid] = {"qids": list(batch_qids), "answers": {}}
-    answered, batch_answers = False, None
-    try:
-        _emit(event, sid, payload)
-        # Event semantics: None → wait forever (clarify_timeout <= 0; released only by a real answer or
-        # session.interrupt), 0 → return immediately, > 0 → bounded wait.
-        answered = ev.wait(timeout)
-    finally:
-        with _prompt_lock:
-            _pending.pop(rid, None)
-            _pending_prompt_payloads.pop(rid, None)
-            answer_present = rid in _answers
-            answer = _answers.pop(rid, "")
-            if (batch_state := _batch_clarify.pop(rid, None)) is not None:
-                batch_answers = dict(batch_state["answers"])
-    expire = lambda: _emit(f"{event.removesuffix('.request')}.expire", sid, {"request_id": rid})
-    if batch_qids is not None:
-        # Explicit cancel-all resolves via _answers; retain a valid batch envelope
-        # so the tool can distinguish cancellation from malformed callback delivery.
-        if answer_present:
-            return json.dumps({"answers": {}}, ensure_ascii=False) if answer == "" else answer
-        result: dict[str, object] = {"answers": batch_answers or {}}
-        if not answered:
-            # Deadline hit: keep what was locked, report the rest as absences (not skips), still expire live cards.
-            result["timed_out"] = True
-            expire()
-        return json.dumps(result, ensure_ascii=False)
-    if not answered and not answer_present and event in _EXPIRING_REQUESTS:
-        expire()
-    return answer
-
 
 def _clarify_timeout_seconds() -> float | None:
     """Clarify wait for the TUI/desktop bridge from the canonical config (gateway/CLI parity); 300s

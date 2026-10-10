@@ -22,12 +22,11 @@ def resolve_output_limit(config, *, model, provider, requested_provider='', base
     global_limit = positive_int(model_section.get('max_tokens')) if isinstance(model_section, dict) else None
     if global_limit is not None:
         return global_limit
+    provider_key = str(provider or '').lower().removeprefix('custom:')
     identities = {str(p or '').lower().removeprefix('custom:')
                   for p in (provider, requested_provider)}
     # A built-in provider must not inherit a local route's limit from a matching URL/model.
-    if provider not in {'custom', ''} and not any(
-        name in identities for name in config.get('providers', {})
-    ):
+    if provider_key not in {'custom', ''} and provider_key not in config.get('providers', {}):
         return None
     candidates = []
     for name, entry in config.get('providers', {}).items():

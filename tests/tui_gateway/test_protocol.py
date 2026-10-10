@@ -433,13 +433,23 @@ def test_window_owned_request_refuses_at_once_when_no_window_shows_the_session(s
     distinct not-shown refusal now, instead of the agent waiting out the 45s bridge deadline."""
     from tui_gateway import server_requests
 
-    server.handle_request({
-        "id": "cancel", "method": "clarify.respond",
-        "params": {"request_id": rid, "answer": ""},
-    })
-
-    thread.join(timeout=5)
-    assert json.loads(box["answer"]) == {"answers": {}}
+    windows = _two_window_session(server, "s-none")
+    box = {}
+    thread = threading.Thread(target=lambda: box.setdefault("r", server._ask("preview.read", "s-none", {}, timeout=30)),
+                              daemon=True)
+    thread.start()
+    req = _wait_open(server_requests)
+    t0 = time.monotonic()
+    assert server.dispatch(_not_shown(req), windows[0]) is None
+    # A replayed decline from the same window is still one window's vote.
+    server.dispatch(_not_shown(req), windows[0])
+    time.sleep(0.05)
+    assert thread.is_alive()
+    server.dispatch(_not_shown(req), windows[1])
+    thread.join(timeout=2)
+    assert not thread.is_alive() and time.monotonic() - t0 < 2
+    assert json.loads(box["r"]) == {"success": False, "error": server_requests.NOT_SHOWN_MESSAGE}
+    assert server_requests.open_requests("s-none") == []
 
 
 def test_window_owned_request_decline_does_not_beat_the_owner_window(server):
