@@ -65,7 +65,7 @@ PROGRESS_RESET_TOOL_NAMES = frozenset({
     "cronjob_manage", "todo", "todo_list", "memory", "skill_manage",
 })
 
-_BOOL_FIELDS = ("warnings_enabled", "hard_stop_enabled", "non_interactive_hard_stop_enabled")
+_BOOL_FIELDS = ("warnings_enabled", "hard_stop_enabled", "non_interactive_hard_stop_enabled", "api_hard_stop_enabled")
 # Threshold field -> (nested section, nested key). The flat legacy key is the field name itself.
 _THRESHOLD_SOURCES: dict[str, tuple[str, str]] = {
     "exact_failure_warn_after": ("warn_after", "exact_failure"),
@@ -81,8 +81,9 @@ _DEFAULT_MAX_WEB_SEARCHES_PER_TURN = 50
 _DEFAULT_MAX_SUBAGENTS_PER_TURN = 50
 _DEFAULT_MAX_EXECUTE_CODE_CALLS_PER_TURN = 8
 
-# Interactive surfaces plus bounded supervised task loops (subagent stopped by its parent;
-# api_server has a live client) doing real edit -> re-run work keep the warn-only default.
+# Interactive surfaces and parent-supervised subagents keep the warn-only default.
+# API is classified here separately from unattended gateways; its explicit policy
+# below defaults to hard stops because a connected client does not imply supervision.
 _ATTENDED_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp", "subagent", "api_server"})
 
 
@@ -132,6 +133,7 @@ class ToolCallGuardrailConfig:
     warnings_enabled: bool = True
     hard_stop_enabled: bool = False
     non_interactive_hard_stop_enabled: bool = True
+    api_hard_stop_enabled: bool = True
     exact_failure_warn_after: int = 2
     exact_failure_block_after: int = 5
     same_tool_failure_warn_after: int = 3
@@ -155,6 +157,12 @@ class ToolCallGuardrailConfig:
         flags = {name: _as_bool(data.get(name), getattr(d, name)) for name in _BOOL_FIELDS}
         if flags["non_interactive_hard_stop_enabled"] and _is_non_interactive_platform(platform):
             flags["hard_stop_enabled"] = True
+        # A connected HTTP client is not proof that a person is supervising each
+        # tool turn. Preserve local attended defaults, but contain API loops.
+        if isinstance(platform, str) and platform.strip().lower() == "api_server":
+            flags["hard_stop_enabled"] = _as_bool(
+                data.get("hard_stop_enabled"), flags["api_hard_stop_enabled"]
+            )
 
         def threshold(name: str, section_name: str, key: str) -> int:
             section = data.get(section_name)
@@ -421,6 +429,8 @@ class ToolCallGuardrailController:
         return decision
 
     def before_call(self, tool_name: str, args: Mapping[str, Any] | None) -> ToolGuardrailDecision:
+        if self._halt_decision is not None and self._halt_decision.action == "halt":
+            return self._halt_decision
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
         allow = ToolGuardrailDecision(tool_name=tool_name, signature=signature)
@@ -625,7 +635,7 @@ class ToolCallGuardrailController:
             # The no-progress BLOCK in before_call only covers idempotent_tools; this streak
             # is tool-agnostic, so with hard stops on, halt at the same threshold (a model
             # replaying a successful `terminal` call otherwise runs to the budget).
-            if self.config.hard_stop_enabled and count >= self.config.no_progress_block_after and self._halt_decision is None:
+            if self.config.hard_stop_enabled and count >= self.config.no_progress_block_after and (self._halt_decision is None or self._halt_decision.action != "halt"):
                 self._decide("halt", "identical_call_streak_halt", tool_name, count, signature)
 
         # Batch-cycle detection (oh-my-pi#10521): a repeating multi-call cycle resets the
@@ -639,7 +649,7 @@ class ToolCallGuardrailController:
             if cycle is not None:
                 period, laps = cycle
                 notice, kind = _IDENTICAL_CYCLE_NOTICE.format(count=laps, period=period, tool_name=tool_name), "identical_cycle"
-                if self.config.hard_stop_enabled and laps >= self.config.no_progress_block_after and self._halt_decision is None:
+                if self.config.hard_stop_enabled and laps >= self.config.no_progress_block_after and (self._halt_decision is None or self._halt_decision.action != "halt"):
                     self._decide("halt", "identical_cycle_halt", tool_name, laps, signature, period=period)
 
         stub = None

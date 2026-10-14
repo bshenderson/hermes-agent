@@ -445,10 +445,10 @@ def test_browser_retry_after_action_is_not_a_replay():
 
 
 def test_supervised_task_platforms_keep_warning_only_default():
-    for platform in ("subagent", "api_server", "cli"):
+    for platform in ("subagent", "cli"):
         cfg = ToolCallGuardrailConfig.from_mapping({}, platform=platform)
         assert cfg.hard_stop_enabled is False, platform
-    for platform in ("telegram", "discord", "cron", "kanban"):
+    for platform in ("api_server", "telegram", "discord", "cron", "kanban"):
         cfg = ToolCallGuardrailConfig.from_mapping({}, platform=platform)
         assert cfg.hard_stop_enabled is True, platform
 

@@ -518,6 +518,28 @@ def test_web_search_synthesis_redirect_ends_turn_instead_of_looping():
     assert "stopped retrying" in result["final_response"]
 
 
+def test_gxtd712_api_plugin_empty_loop_ends_real_agent_turn():
+    agent = _make_agent("media_workflow_recall", max_iterations=20, platform="api_server")
+    args = json.dumps({"query": "hermes architecture diagram layered stack render png svg mermaid plantuml"})
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(content="", finish_reason="tool_calls", tool_calls=[
+            _mock_tool_call("media_workflow_recall", args, f"recall-{index}")
+        ]) for index in range(20)
+    ]
+    with (
+        patch("model_tools.handle_function_call", return_value=json.dumps({
+            "success": True, "workflows": [], "count": 0
+        })) as dispatch,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("Generate the homelab architecture diagram")
+    assert dispatch.call_count == 5
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "identical_call_streak_halt"
+
+
 def test_execute_code_semantic_http_error_counts_as_tool_failure():
     result = json.dumps({
         "status": "success",
