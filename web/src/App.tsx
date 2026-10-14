@@ -16,7 +16,6 @@ import {
   Routes,
   Route,
   NavLink,
-  Navigate,
   useLocation,
   useNavigate,
 } from "react-router";
@@ -106,6 +105,7 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { SessionsRedirect } from "@/components/SessionsRedirect";
 import { latchChatActivation } from "@/lib/chat-activation";
 import { sharedGatewayProfiles, sharedGatewayRestartDescription } from "@/lib/shared-gateway";
 import { api } from "@/lib/api";
@@ -127,7 +127,7 @@ function RouteFallback({ label = "Loading…" }: { label?: string }) {
 }
 
 function RootRedirect() {
-  return <Navigate to="/sessions" replace />;
+  return <SessionsRedirect />;
 }
 
 function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
@@ -135,7 +135,7 @@ function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
     // Render nothing during the plugin-load window — a spinner here would just flash.
     return null;
   }
-  return <Navigate to="/sessions" replace />;
+  return <SessionsRedirect />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
