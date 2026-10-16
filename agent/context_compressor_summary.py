@@ -59,7 +59,7 @@ class SummaryDispatchMixin:
 
     def _summarize_window(
         self, messages: list[dict[str, Any]], turns_to_summarize: list[dict[str, Any]], scan: _HandoffScan,
-        focus_topic: Optional[str], memory_context: str, bypass_cooldown: bool,
+        focus_topic: Optional[str], memory_context: str, bypass_cooldown: bool, checkpoint_records=None,
     ) -> Optional[str]:
         """Run the summary LLM; a cancellation rolls back the handoff scan's self-heal mutation first.
         A deterministic pin (repeated stall, #112420) skips the LLM: ``None`` lets Phase 3 insert the static
@@ -86,6 +86,8 @@ class SummaryDispatchMixin:
         }
         if _accepts_keyword_argument(self._generate_summary, "bypass_cooldown"):
             summary_kwargs["bypass_cooldown"] = bypass_cooldown
+        if checkpoint_records is not None and _accepts_keyword_argument(self._generate_summary, "checkpoint_records"):
+            summary_kwargs["checkpoint_records"] = checkpoint_records
         try:
             return self._generate_summary(turns_to_summarize, **summary_kwargs)
         except AuxiliaryExplicitCancellation:

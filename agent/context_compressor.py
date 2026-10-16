@@ -3708,18 +3708,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)
         return result
 
-    def _augment_summary_lean(self, summary: str, turns_to_summarize: list[dict[str, Any]]) -> str:
-        """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
-        if getattr(self, "tail_mode", "lean") != "lean":
-            return summary
-        for heading, build in (
-            (_LEAN_ANCHOR_HEADING, lambda: _redact_compaction_text(_build_anchor_index(turns_to_summarize))),
-            (_LEAN_USER_MESSAGES_HEADING, lambda: _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))),
-            (_LEAN_RECOVERY_HEADING, lambda: _build_recovery_footer(getattr(self, "_session_id", "") or "", len(turns_to_summarize))),
-        ):
-            if heading not in summary:
-                summary += build()
-        return summary
+    def _augment_summary_lean(self, summary: str, turns_to_summarize: list[dict[str, Any]],
+                              records=None, output_tokens=None) -> str:
+        """Append lean sections within the caller's checkpoint allocation, if any."""
+        from agent.compression_preservation import augment_summary
+        return augment_summary(self, summary, turns_to_summarize, records, output_tokens)
 
     @classmethod
     def _bound_summary_input(cls, content: str) -> str:
@@ -4011,7 +4004,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
     def _generate_summary(
         self, turns_to_summarize: list[dict[str, Any]], focus_topic: Optional[str] = None,
-        memory_context: str = "", bypass_cooldown: bool = False,
+        memory_context: str = "", bypass_cooldown: bool = False, checkpoint_records=None,
     ) -> Optional[str]:
         """Structured summary of the turns (iterative update when a previous summary exists); None if all attempts fail."""
         prompt_started_at = time.monotonic()
@@ -4081,7 +4074,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             # See #32106.
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
             summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
-            summary = self._augment_summary_lean(summary, turns_to_summarize)
+            summary = self._augment_summary_lean(
+                summary, turns_to_summarize, checkpoint_records, budget['output_tokens'] if budget else None)
             self._validate_summary_user_provenance(summary, has_user_turn)
 
             # A detached stale attempt must not publish its late summary onto shared compressor state:
@@ -5705,6 +5699,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         if not feasibility_skip:
             summary = self._summarize_window(
                 messages, turns_to_summarize, scan, focus_topic, memory_context, bypass_cooldown,
+                checkpoint_records=source_records,
             )
             if not summary and self._abort_on_summary_failure(
                 telemetry, compress_end - compress_start, scan.previous_summary_before,

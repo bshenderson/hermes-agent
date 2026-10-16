@@ -96,6 +96,79 @@ def encode_records(records):
     return CONTRACT + '\n' + START + '\n' + '\n'.join(quoted) + '\n' + END
 
 
+def _bounded_user_excerpts(turns, byte_budget):
+    from agent import context_compressor as cc
+    header = '\n\n' + cc._LEAN_USER_MESSAGES_HEADING + '\n'
+    footer = '\n(Quoted excerpts only; omitted text remains in pre-compaction session history.)'
+    remaining = byte_budget - len((header + footer).encode('utf-8'))
+    quoted = []
+    for message in reversed(turns):
+        if message.get('role') != 'user':
+            continue
+        text = cc._content_text_for_contains(message.get('content'))
+        if cc._synthetic_user_row(text):
+            continue
+        text = cc._redact_compaction_text(text.strip())
+        separator = '\n\n' if quoted else ''
+        low, high = 0, min(len(text), cc._LEAN_USER_MESSAGE_MAX_CHARS)
+        best = ''
+        while low <= high:
+            limit = (low + high) // 2
+            if limit < len(text) and limit <= cc.ELISION_MARKER_MAX_LEN:
+                low = limit + 1
+                continue
+            excerpt = cc.elide(text, limit)
+            rendered = separator + '> ' + excerpt.replace('\n', '\n> ')
+            if len(rendered.encode('utf-8')) <= remaining:
+                best = rendered
+                low = limit + 1
+            else:
+                high = limit - 1
+        if not best:
+            break
+        quoted.append(best)
+        remaining -= len(best.encode('utf-8'))
+    return header + ''.join(quoted) + footer if quoted else ''
+
+
+def augment_summary(compressor, summary, turns, records=None, output_tokens=None):
+    """Allocate optional presentation after reserving the complete checkpoint."""
+    from agent import context_compressor as cc
+    if getattr(compressor, 'tail_mode', 'lean') != 'lean':
+        return summary
+    sections = (
+        (cc._LEAN_ANCHOR_HEADING, lambda: cc._redact_compaction_text(cc._build_anchor_index(turns))),
+        (cc._LEAN_USER_MESSAGES_HEADING, lambda: cc._redact_compaction_text(cc._build_verbatim_user_section(turns))),
+        (cc._LEAN_RECOVERY_HEADING, lambda: cc._build_recovery_footer(
+            getattr(compressor, '_session_id', '') or '', len(turns))),
+    )
+    if records is None:
+        for heading, build in sections:
+            if heading not in summary:
+                summary += build()
+        return summary
+    if output_tokens is None:
+        raise CompressionBudgetError('checkpoint output budget is required for source records')
+    # All immutable custody and assembly bytes precede optional quote allocation.
+    framing = cc.SUMMARY_PREFIX + '\n\n\n' + encode_records(records) + '\n\n' + cc._SUMMARY_END_MARKER
+    remaining = output_tokens - len((framing + summary).encode('utf-8'))
+    if remaining < 0:
+        raise CompressionBudgetError('mandatory checkpoint exceeds output byte budget')
+    additions = {}
+    # Keep the archive pointer before spending room on anchors or quotations.
+    for index in (2, 0):
+        heading, build = sections[index]
+        if heading not in summary:
+            text = build()
+            size = len(text.encode('utf-8'))
+            if size <= remaining:
+                additions[index] = text
+                remaining -= size
+    if cc._LEAN_USER_MESSAGES_HEADING not in summary:
+        additions[1] = _bounded_user_excerpts(turns, remaining)
+    return summary + ''.join(additions.get(index, '') for index in range(3))
+
+
 def frame_summary(compressor, summary, records, output_tokens):
     """Restore trusted records only AFTER all model-summary normalization."""
     from agent.context_compressor import _redact_compaction_text
