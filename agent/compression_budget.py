@@ -5,7 +5,6 @@ individual requests rather than gambling on a chars/token ratio for code or
 Unicode. Output and chat-template reserves are independent of input size.
 """
 
-
 class CompressionBudgetError(ValueError):
     """A configured lossless pass cannot safely fit its prompt."""
 
@@ -30,6 +29,7 @@ def summarize_bounded(source, build_prompt, call, *, context_length, output_toke
     budget = context_length - output_tokens - safety_tokens
     if min(budget, output_tokens, safety_tokens) <= 0:
         raise ValueError('invalid compression budget')
+
     chunk_prompt = build_chunk_prompt or build_prompt
     overhead = max(len(build_prompt('').encode('utf-8')), len(chunk_prompt('').encode('utf-8')))
     available = budget - overhead

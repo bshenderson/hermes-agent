@@ -3711,6 +3711,24 @@ def _commit_compaction(
     commit_started_at = time.monotonic()
     split_status = "not_applicable"
     old_session_id: Optional[str] = None  # bound only once rotation begins
+    def source_refusal(candidate):
+        from agent.compression_preservation import reject_installation
+        original = messages_before_compression if messages_before_compression is not None else messages
+        if not reject_installation(agent, original, candidate, attempt):
+            return None
+        _emit_compression_attempt_telemetry(
+            agent, started_at=attempt.started_at, commit_status="aborted", split_status="aborted",
+            failure_class="source_preservation_refused", commit_started_at=commit_started_at,
+            attempt_seed=attempt.seed, history_rewritten=False,
+        )
+        return _CommitOutcome(
+            compressed=messages, refused_prompt=_existing_system_prompt(agent, system_message),
+            commit_started_at=commit_started_at,
+        )
+
+    refused = source_refusal(compressed)
+    if refused is not None:
+        return refused
     if agent._session_db:
         split_status = "pending"
         try:
@@ -3725,13 +3743,23 @@ def _commit_compaction(
                 return _CommitOutcome(
                     compressed=messages, refused_prompt=_refused_sp, commit_started_at=commit_started_at
                 )
+            refused = source_refusal(compressed)
+            if refused is not None:
+                return refused
+            from hermes_cli.partial_compress import rejoin_compressed_head_and_tail
+            # Join once, before memory publication; persist this exact validated
+            # object in either branch rather than rebuilding after side effects.
+            persisted_candidate = (rejoin_compressed_head_and_tail(compressed, verbatim_tail)
+                                   if verbatim_tail else compressed)
+            refused = source_refusal(persisted_candidate)
+            if refused is not None:
+                return refused
             # Publish memory only after every refusal gate, from the immutable pre-compression snapshot.
             # The engine's session-end reset nulls the in-flight attempt telemetry the success emit
             # still needs (#118580), so hold it across the call.
             with _hold_attempt_telemetry(agent.context_compressor):
                 agent.commit_memory_session(original_messages)
             from agent.context_compressor import PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, stamp_db_persisted_markers
-            from hermes_cli.partial_compress import rejoin_compressed_head_and_tail
             if in_place:
                 # In-place compaction: same session_id; soft-archive old turns (active=0, still
                 # searchable) + insert `compressed` atomically; no pre-flush (tail already in).
@@ -3761,14 +3789,16 @@ def _commit_compaction(
                     r for m in _tail_held if isinstance(m, dict)
                     for r in map(_positive_id, m.get(ABSORBED_ROW_IDS) or ())
                     if r is not None and agent._session_db.get_message_role(agent.session_id, r) is not None})
-                persisted = compressed
+                persisted = persisted_candidate
                 if verbatim_tail:
                     # The kept exchanges are durable rows under the watermark, so the archive below covers
                     # them too. Store them after the head in the same transaction, with the seam the caller
                     # would build, and count their originals as carried duplicates like compress()'s tail.
-                    persisted = rejoin_compressed_head_and_tail(compressed, verbatim_tail)
                     tail_count += len(verbatim_tail)
                 from agent.conversation_compression_archive import coverage_for_commit
+                refused = source_refusal(persisted)
+                if refused is not None:
+                    return refused
                 covered_ids, unresolved_held = coverage_for_commit(
                     agent._session_db, agent.session_id,
                     messages_before_compression if messages_before_compression is not None else messages,
@@ -3810,10 +3840,10 @@ def _commit_compaction(
                 # rollback off this name, so anything that fails from here on rolls the transcript back
                 # instead of leaving the failed attempt's compacted snapshot in place.
                 old_session_id = agent.session_id
-                if verbatim_tail:
-                    # Publish the kept exchanges with the head, as the in-place branch stores them: the
-                    # gateway no longer rewrites a published child, so a head-only handoff loses the tail.
-                    compressed = rejoin_compressed_head_and_tail(compressed, verbatim_tail)
+                compressed = persisted_candidate
+                refused = source_refusal(compressed)
+                if refused is not None:
+                    return refused
                 _publish_rotated_compaction(
                     agent, messages, compressed, new_system_prompt=new_system_prompt, lease=lease,
                     old_session_id=old_session_id, compressed_user_turn_outcome=compressed_user_turn_outcome,
