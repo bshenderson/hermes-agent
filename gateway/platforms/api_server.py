@@ -927,29 +927,9 @@ _api_agent_request_reservation: ContextVar[Optional[dict[str, bool]]] = ContextV
 
 
 def _admit_api_agent_request(handler):
-    """Reserve an authenticated API turn before its handler first awaits: drain check +
-    reservation in one non-awaiting block so a request admitted just before shutdown can't go
-    invisible while parsing its body. The mutable reservation releases the slot exactly once."""
-    @wraps(handler)
-    async def _wrapped(self, request, *args, **kwargs):
-        auth_err = (
-            self._check_run_auth(request, permission="dispatch")
-            if _api_runs._uses_room_run_auth(self, request)
-            else self._check_auth(request))
-        if auth_err:
-            return auth_err
-        draining = self._draining_response()
-        if draining is not None:
-            return draining
-        reservation = {"active": True}
-        token = _api_agent_request_reservation.set(reservation)
-        self._pending_agent_requests += 1
-        try:
-            return await handler(self, request, *args, **kwargs)
-        finally:
-            _release_pending_api_work(self, reservation)
-            _api_agent_request_reservation.reset(token)
-    return _wrapped
+    """Reserve drain-visible API work and apply optional bounded run queueing."""
+    from gateway.platforms.api_server_run_queue import admit_request
+    return admit_request(handler)
 
 
 def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
@@ -1232,6 +1212,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._last_resolved_model: dict[str, str] = {}
         self._session_db_lock: Optional[asyncio.Lock] = None  # single-flight for lazy init
         self._max_concurrent_runs: int = self._resolve_max_concurrent_runs()  # 0 disables
+        self._max_pending_runs = self._resolve_api_server_int('max_pending_runs', default=0)
+        self._pending_run_timeout = self._resolve_api_server_int('pending_run_timeout_seconds', default=120)
+        self._api_run_waiters: list[object] = []
         self._history_tool_output_max_chars = self._resolve_api_server_int(
             "history_tool_output_max_chars", default=0)
         # In-flight _run_agent() turns (/v1/runs tracks its own via _active_run_tasks).
@@ -1416,6 +1399,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "host": self._host,
             "port": self._port,
             "active_runs": self._active_structured_run_count() + self._inflight_agent_runs,
+            "run_admission": {
+                "active_limit": self._max_concurrent_runs,
+                "pending_limit": self._max_pending_runs,
+                "pending": len(self._api_run_waiters),
+                "pending_timeout_seconds": self._pending_run_timeout,
+            },
             "stored_runs": len(self._run_statuses),
             "last_request_at": self._iso_timestamp(self._metrics_last_request_at),
             "last_heartbeat": self._iso_timestamp(heartbeat),
@@ -4083,7 +4072,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         limit = self._max_concurrent_runs
         if limit <= 0:
             return None
-        inflight = self.active_agent_work_count()
+        from gateway.platforms.api_server_run_queue import queued_count
+        inflight = self.active_agent_work_count() - queued_count(self)
         # The current request's own reservation must not consume its last available slot.
         reservation = _api_agent_request_reservation.get()
         if reservation and reservation["active"]:

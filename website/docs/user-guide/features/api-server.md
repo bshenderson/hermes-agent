@@ -736,6 +736,8 @@ gateway:
     cors_origins: http://localhost:3000
     model_name: my-hermes
     max_concurrent_runs: 10   # concurrent-run cap; 0 disables the limit
+    max_pending_runs: 0      # opt-in bounded FIFO waiters above the run cap
+    pending_run_timeout_seconds: 120
     history_tool_output_max_chars: 0   # cap tool outputs in stored /v1/responses history; 0 = verbatim
 ```
 
@@ -744,6 +746,19 @@ gateway:
 ### Concurrent-run cap
 
 The API server limits how many agent runs may execute at once across the endpoints that start one directly: the OpenAI-compatible endpoints, the Runs endpoints, and the session-chat endpoints (`POST /api/sessions/{id}/chat` and its `/stream` variant, which carry cross-machine agent DMs). Cron-triggered runs (`POST /api/jobs/{id}/run`, `POST /api/cron/fire`) go through the cron scheduler and are governed by cron's own limits, not this cap. The cap is read from `gateway.api_server.max_concurrent_runs` (default **10**; `0` disables the limit, negative values clamp to 0). When the cap is reached, new run-starting requests are rejected with **HTTP 429** `Too many concurrent runs (max N)` — clients should back off and retry.
+
+Set `max_pending_runs` to a positive count to wait above that active-run cap
+instead of immediately refusing. Pending requests are FIFO and expire after
+`pending_run_timeout_seconds`; a full queue returns HTTP429 `run_queue_full`, and
+an expired waiter returns HTTP429 `run_queue_timeout`, both with Retry-After.
+Authentication precedes queue admission. Pending requests remain visible to
+shutdown draining but do not consume active-run capacity; cancellation,
+disconnect and draining retire only their own waiters without starting an agent.
+The queue is in-memory, not durable jobs or automatic replay. The status payload's
+`run_admission` block exposes configured caps, current pending count and wait
+deadline. Keep client timeouts above API wait plus downstream generation queue
+and generation time. A run may perform tools between generations, so this cap
+must not be confused with a model server's sequence count or native slots.
 
 ### Stored history size for `previous_response_id` chaining
 
