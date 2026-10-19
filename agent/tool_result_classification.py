@@ -23,6 +23,24 @@ def tool_may_have_side_effect(tool_name: str) -> bool:
     return tool_name not in NO_EFFECT_TOOL_NAMES
 
 
+def typed_tool_non_success(result: Any) -> bool:
+    """Recognize terminal non-success before progress accounting.
+
+    Tool-loop guidance can follow the leading JSON object. Unknown effects remain
+    effect-capable; this predicate must never grant safe replay or rollback.
+    """
+    data = result
+    if isinstance(result, str):
+        try:
+            data, _ = json.JSONDecoder().raw_decode(result.lstrip())
+        except (ValueError, RecursionError):
+            return False
+    if not isinstance(data, dict) or data.get("guardrail_refusal") is True:
+        return False
+    status = data.get("status")
+    return isinstance(status, str) and status in {"denied", "blocked", "failed", "unknown"}
+
+
 # Set by a tool that REFUSED a call the harness judged redundant (repeated identical
 # read/search). The body still carries ``"error"`` so the model reads it as a stop
 # signal, but nothing failed: failure classifiers must not count it, or the cheap
