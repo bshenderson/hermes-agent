@@ -654,6 +654,16 @@ class OpenAICompatRoutesMixin:
         if not messages or not isinstance(messages, list):
             return _invalid_request("Missing or invalid 'messages' field")
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        # GXTD-720: authenticated final-body provenance, never model authority.
+        media_file_turn = None
+        if "hermes_media_context" in body:
+            from agent.chat_location import accept_media_turn
+            try:
+                media_file_turn = accept_media_turn(body, profile=_api_request_profile.get() or "default",
+                                                    key=self._expected_api_key())
+            except (ValueError, TypeError, KeyError):
+                return _invalid_request("Invalid authenticated Media turn")
+            body.pop("hermes_media_context", None)
 
         # System messages -> ephemeral system prompt layered ON TOP of core, flattened to text
         # (Anthropic rejects images there, OpenAI text models ignore them).
@@ -719,6 +729,11 @@ class OpenAICompatRoutesMixin:
             first_user = next(
                 (cm.get("content", "") for cm in conversation_messages if cm.get("role") == "user"), "")
             session_id = _derive_chat_session_id(system_prompt, first_user, _api_request_profile.get())
+        if media_file_turn is not None:
+            import hashlib
+            media_scope = hashlib.sha256(json.dumps([media_file_turn["subject"], media_file_turn["chat_id"]]).encode()).hexdigest()[:32]
+            session_id = "owui-media-" + media_scope
+            gateway_session_key = "owui-media:" + media_scope
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
@@ -740,6 +755,8 @@ class OpenAICompatRoutesMixin:
             session_history_delivery=("1" if provided_session_id else ""))
         # This is presentation only. The ordinary API-key/session authorization
         # above still applies; it grants no internal ingress or control authority.
+        if media_file_turn is not None:
+            run_kwargs["media_file_turn"] = media_file_turn
         if provided_session_id and body.get("hermes_notification_category") == "diagnostic":
             run_kwargs["notification_category"] = "diagnostic"
         if stream:

@@ -583,6 +583,13 @@ def salvage_grown_transcript(
         return None
 
     out = [dict(msg) if isinstance(msg, dict) else msg for msg in candidate]
+    # A source-bearing handoff may be retained whole or refused, never sliced.
+    from agent.compression_preservation import START as source_records_marker
+    if any(isinstance(message, dict)
+           and message.get(COMPRESSED_SUMMARY_METADATA_KEY)
+           and source_records_marker in str(message.get('content', ''))
+           for message in out):
+        return None
     tool_indices = [i for i, msg in enumerate(out) if isinstance(msg, dict) and msg.get("role") == "tool"]
     last_assistant_idx = _last_index_with_role(out, "assistant")
     salvage_reasoning_keys = _NEWEST_TURN_ONLY_BUDGET_KEYS + ("reasoning_details",)
@@ -3701,18 +3708,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)
         return result
 
-    def _augment_summary_lean(self, summary: str, turns_to_summarize: list[dict[str, Any]]) -> str:
-        """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
-        if getattr(self, "tail_mode", "lean") != "lean":
-            return summary
-        for heading, build in (
-            (_LEAN_ANCHOR_HEADING, lambda: _redact_compaction_text(_build_anchor_index(turns_to_summarize))),
-            (_LEAN_USER_MESSAGES_HEADING, lambda: _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))),
-            (_LEAN_RECOVERY_HEADING, lambda: _build_recovery_footer(getattr(self, "_session_id", "") or "", len(turns_to_summarize))),
-        ):
-            if heading not in summary:
-                summary += build()
-        return summary
+    def _augment_summary_lean(self, summary: str, turns_to_summarize: list[dict[str, Any]],
+                              records=None, output_tokens=None) -> str:
+        """Append lean sections within the caller's checkpoint allocation, if any."""
+        from agent.compression_preservation import augment_summary
+        return augment_summary(self, summary, turns_to_summarize, records, output_tokens)
 
     @classmethod
     def _bound_summary_input(cls, content: str) -> str:
@@ -4004,7 +4004,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
     def _generate_summary(
         self, turns_to_summarize: list[dict[str, Any]], focus_topic: Optional[str] = None,
-        memory_context: str = "", bypass_cooldown: bool = False,
+        memory_context: str = "", bypass_cooldown: bool = False, checkpoint_records=None,
     ) -> Optional[str]:
         """Structured summary of the turns (iterative update when a previous summary exists); None if all attempts fail."""
         prompt_started_at = time.monotonic()
@@ -4033,12 +4033,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if has_user_turn is None:
             has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
         budget = None
+
         try:
             budget = lossless_settings()
             build = lambda text: self._build_summary_prompt(text, summary_budget, focus_topic, memory_context, has_user_turn)
             if budget:
+                serialized = self._serialize_for_summary(turns_to_summarize, lossless=True)
+
                 content = summarize_bounded(
-                    self._serialize_for_summary(turns_to_summarize, lossless=True), build,
+                    serialized, build,
                     lambda prompt: self._call_summary_llm(prompt, prompt_started_at), **budget,
                     build_chunk_prompt=lambda text: (
                         "Extract durable facts from this one contiguous conversation segment. "
@@ -4071,8 +4074,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             # See #32106.
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
             summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
-            summary = self._augment_summary_lean(summary, turns_to_summarize)
+            summary = self._augment_summary_lean(
+                summary, turns_to_summarize, checkpoint_records, budget['output_tokens'] if budget else None)
             self._validate_summary_user_provenance(summary, has_user_turn)
+
             # A detached stale attempt must not publish its late summary onto shared compressor state:
             # the fallback already advanced _previous_summary and owns the cooldown/error fields. The
             # candidate itself is discarded downstream by the working-attempt check; bail here so the
@@ -5626,6 +5631,17 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Unpruned copy for no-op/abort returns (history stays lossless) and finalize; head/tail are
         # assembled and measured from the pruned copy (#61932).
         canonical_messages = self._drop_blank_echoes(messages)
+        from agent.compression_preservation import (
+            collect_records, frame_summary, validate_checkpoint, refuse_replacement,
+        )
+        preservation_previous_summary = self._previous_summary
+        try:
+            preservation_budget = lossless_settings()
+            source_records = (collect_records(self, canonical_messages, preservation_budget['output_tokens'])
+                              if preservation_budget else None)
+        except CompressionBudgetError as error:
+            refuse_replacement(self, preservation_previous_summary, error)
+            return canonical_messages
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
             messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=self.tail_token_budget,
@@ -5683,6 +5699,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         if not feasibility_skip:
             summary = self._summarize_window(
                 messages, turns_to_summarize, scan, focus_topic, memory_context, bypass_cooldown,
+                checkpoint_records=source_records,
             )
             if not summary and self._abort_on_summary_failure(
                 telemetry, compress_end - compress_start, scan.previous_summary_before,
@@ -5693,8 +5710,23 @@ Write only the summary body. Do not include any preamble or prefix."""
                 telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
             )
         # Phase 4: Assemble compressed message list
+        if preservation_budget:
+            try:
+                summary = frame_summary(self, summary, source_records, preservation_budget['output_tokens'])
+            except CompressionBudgetError as error:
+                refuse_replacement(self, preservation_previous_summary, error)
+                return canonical_messages
         compressed = self._assemble_compressed(messages, compress_start, compress_end, scan, summary)
-        return self._finalize_compressed(compressed, canonical_messages, n_messages, spare_pending_images, pruned_count)
+        result = self._finalize_compressed(compressed, canonical_messages, n_messages, spare_pending_images, pruned_count)
+        if preservation_budget:
+            try:
+                validate_checkpoint(self, canonical_messages, result, preservation_budget['output_tokens'])
+            except CompressionBudgetError as error:
+                self.compression_count -= 1
+                refuse_replacement(self, preservation_previous_summary, error)
+                return canonical_messages
+            self._previous_summary = self._strip_summary_prefix(summary)
+        return result
 
     def _assemble_compressed(
         self, messages: list[dict[str, Any]], compress_start: int, compress_end: int, scan: _HandoffScan, summary: str,

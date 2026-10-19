@@ -998,6 +998,10 @@ def _degraded_suffix(data: dict) -> str:
 
 def _detect_tool_failure(tool_name: str, result: Any) -> tuple[bool, str]:
     """Return ``(is_failure, suffix)`` for a tool result, e.g. ``(True, " [exit 1]")``."""
+    from agent.tool_result_classification import typed_tool_non_success
+
+    if typed_tool_non_success(result):
+        return True, t("display.failure.generic")
     if result is None or file_mutation_result_landed(tool_name, result):
         return False, ""
     data = result if isinstance(result, dict) else safe_json_loads(result)

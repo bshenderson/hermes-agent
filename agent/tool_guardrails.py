@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Mapping
 
 from utils import safe_json_loads
-from agent.tool_result_classification import file_mutation_result_landed, is_guardrail_refusal
+from agent.tool_result_classification import file_mutation_result_landed, is_guardrail_refusal, typed_tool_non_success
 
 
 IDEMPOTENT_TOOL_NAMES = frozenset({
@@ -175,12 +175,12 @@ class ToolCallGuardrailConfig:
         thresholds: dict[str, int] = {name: threshold(name, *src) for name, src in _THRESHOLD_SOURCES.items()}
         thresholds["web_evidence_synthesis_hint_after"] = _int_at_least(
             synthesis_hints.get("web_evidence_after", data.get("web_evidence_synthesis_hint_after")),
-            getattr(d, "web_evidence_synthesis_hint_after"),
+            d.web_evidence_synthesis_hint_after,
             0,
         )
         thresholds["web_search_synthesis_redirect_after"] = _int_at_least(
             synthesis_hints.get("web_search_redirect_after", data.get("web_search_synthesis_redirect_after")),
-            getattr(d, "web_search_synthesis_redirect_after"),
+            d.web_search_synthesis_redirect_after,
             0,
         )
         return cls(loop_caps=LoopCapConfig.from_mapping(data.get("loop_caps")), **flags, **thresholds)
@@ -252,6 +252,8 @@ def canonical_tool_args(args: Mapping[str, Any]) -> str:
 def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
     """Fallback classifier used only when callers don't pass ``failed``; mirrors
     ``agent.display._detect_tool_failure`` so the guardrail never disagrees with the CLI's ``[error]`` tag."""
+    if typed_tool_non_success(result):
+        return True, " [error]"
     if result is None or file_mutation_result_landed(tool_name, result):
         return False, ""
 
