@@ -4088,7 +4088,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _bind_api_server_session(
         *, chat_id: str = "", session_key: str = "", session_id: str = "", profile: str = "",
         browser_control_principal: str = "", browser_control_transport_family: str = "",
-        session_history_delivery: str = "") -> list:
+        session_history_delivery: str = "", user_id: str = "") -> list:
         """Bind an API turn with push disabled and history delivery default-denied.
 
         Only routes whose continuation reads SessionDB may pass "1". An omitted
@@ -4099,7 +4099,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         unbound profile collapses every profile's turns onto the default sandbox (#96370)."""
         from gateway.session_context import set_session_vars
         return set_session_vars(
-            platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id,
+            platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id, user_id=user_id,
             profile=profile, browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family,
             async_delivery=False, cron_session="", session_history_delivery=session_history_delivery)
@@ -4187,7 +4187,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_history_delivery: str = "", turn_author: Optional[dict[str, Any]] = None,
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
-        approval_session_key: Optional[str] = None) -> tuple:
+        approval_session_key: Optional[str] = None, media_file_turn=None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4216,12 +4216,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     session_id=session_id or "", profile=request_profile or "",
                     browser_control_principal=request_browser_control_principal,
                     browser_control_transport_family=request_browser_control_transport_family,
-                    session_history_delivery=session_history_delivery)
+                    session_history_delivery=session_history_delivery,
+                    user_id=(media_file_turn or {}).get("subject", ""))
                 agent = None
+                media_file_token = None
                 from agent.notification_presentation import notification_turn
                 from gateway.warning_notifications import diagnostic_turn_muted
                 muted = diagnostic_turn_muted({"notification_category": notification_category}, "api_server")
                 try:
+                    from agent.media_file_context import bind as bind_media_file_turn
+                    media_file_token = bind_media_file_turn(media_file_turn)
                     agent = self._create_agent(
                         ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
                         stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
@@ -4309,6 +4313,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         exc._notification_presentation_suppressed = True
                     raise
                 finally:
+                    if media_file_token is not None:
+                        from agent.media_file_context import reset as reset_media_file_turn
+                        reset_media_file_turn(media_file_token)
                     # Turn over (any outcome): clear ownership so a late disconnect can't reap
                     # background work this turn deliberately left running.
                     if active_run_id:
