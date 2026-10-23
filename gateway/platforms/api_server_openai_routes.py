@@ -654,6 +654,12 @@ class OpenAICompatRoutesMixin:
         if not messages or not isinstance(messages, list):
             return _invalid_request("Missing or invalid 'messages' field")
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        from gateway.platforms.api_server_artifacts import artifact_binding
+        try:
+            artifact_origin = artifact_binding(
+                body, profile=_api_request_profile.get() or "default", key=self._expected_api_key())
+        except (ValueError, TypeError, KeyError):
+            return _invalid_request("Invalid authenticated artifact turn")
         # GXTD-720: authenticated final-body provenance, never model authority.
         media_file_turn = None
         if "hermes_media_context" in body:
@@ -682,9 +688,29 @@ class OpenAICompatRoutesMixin:
                     return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
                 conversation_messages.append({"role": role, "content": content})
         user_message: Any = (conversation_messages[-1].get("content", "") if conversation_messages else "")
-        history = conversation_messages[:-1]
         if not _content_has_visible_payload(user_message):
             return _invalid_request("No user message found in messages")
+        artifact_root = None
+        if artifact_origin:
+            import hashlib
+            from pathlib import Path
+            from hermes_constants import get_hermes_home
+            namespace = hashlib.sha256(json.dumps(artifact_origin, sort_keys=True).encode()).hexdigest()
+            artifact_root = Path(get_hermes_home()) / 'cache' / 'scratch' / 'authored-artifacts' / namespace
+            artifact_instruction = (
+                '\nThis authenticated OWUI turn supports native authored-file delivery. '
+                f'Write any requested output files under {artifact_root}/ (create the directory if needed). '
+                'Return each completed output with MEDIA:<absolute-path> on its own line. '
+                'The transport uploads those bytes as native chat attachments after the turn; '
+                'do not call Media/ComfyUI for technical diagrams or portable documents. '
+                'Do not claim native attachment acceptance yourself. Other paths will not be transported.')
+            # Turn-specific destination belongs on the new input, never a
+            # changing system prefix or a mutation of prior conversation items.
+            if isinstance(user_message, str):
+                user_message += artifact_instruction
+            else:
+                user_message = [*user_message, {'type': 'text', 'text': artifact_instruction}]
+        history = conversation_messages[:-1]
 
         # X-Hermes-Session-Key scopes long-term memory per channel; independent of
         # X-Hermes-Session-Id (the key persists across transcripts, the id rotates on /new).
@@ -804,7 +830,7 @@ class OpenAICompatRoutesMixin:
             return await self._write_sse_chat_completion(
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=(provided_session_id or session_id),
-                gateway_session_key=gateway_session_key)
+                gateway_session_key=gateway_session_key, artifact_origin=artifact_origin, artifact_root=artifact_root)
 
         async def _compute_completion():
             return await self._run_agent(**run_kwargs)
@@ -906,7 +932,7 @@ class OpenAICompatRoutesMixin:
     async def _write_sse_chat_completion(
         self, request: web.Request, completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str | None = None,
-        gateway_session_key: str | None = None) -> web.StreamResponse:
+        gateway_session_key: str | None = None, artifact_origin=None, artifact_root=None) -> web.StreamResponse:
         """Stream ``chat.completion.chunk`` frames from the agent's delta queue. On client
         disconnect the agent is interrupted (stops LLM calls), then its task wrapper cancelled."""
         from gateway.platforms.api_server import (
@@ -955,6 +981,13 @@ class OpenAICompatRoutesMixin:
                 is_failed = True
                 err_msg = err_msg or str(agent_error)
             finish_reason = _finish_reason(completed, is_partial, is_failed, err_msg, agent_error)
+            if artifact_origin and artifact_root and finish_reason == "stop" and isinstance(result, dict) and not result.get('_notification_presentation_suppressed'):
+                from gateway.platforms.api_server_artifacts import artifact_event
+                event = await asyncio.to_thread(
+                    artifact_event, result.get("final_response") or "", binding=artifact_origin, artifact_root=artifact_root,
+                    session_key=gateway_session_key or "")
+                if event is not None:
+                    await response.write(_sse_frame(event, event="hermes.artifacts"))
             finish_chunk = _chunk({}, finish_reason, usage=_chat_usage_payload(usage))
             presentation_muted = (
                 (isinstance(result, dict) and result.get("_notification_presentation_suppressed") is True)
@@ -965,7 +998,9 @@ class OpenAICompatRoutesMixin:
             # once so the client does not see an empty stream (#31449). Mirrors
             # _ResponsesStream.collect_result for /v1/responses.
             if not content_sent and not presentation_muted and isinstance(result, dict):
-                fallback_text = _resolve_media_to_data_urls(result.get("final_response") or "")
+                fallback_text = result.get("final_response") or ""
+                if not artifact_origin:
+                    fallback_text = _resolve_media_to_data_urls(fallback_text)
                 if fallback_text:
                     await response.write(_sse_frame(_chunk({"content": fallback_text})))
             elif not presentation_muted:
