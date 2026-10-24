@@ -44,7 +44,7 @@ def build_prelude(agent, *, profile, turn, prompt):
 
     def steps():
         names = {t.get('function', {}).get('name') for t in getattr(agent, 'tools', []) if isinstance(t, dict)}
-        if not {'media_match_workflow', 'media_generate'} <= names:
+        if not {'media_match_workflow', 'media_workflows', 'media_generate'} <= names:
             return terminal('The governed Media tools are unavailable; no image was submitted.')
         if os.getenv('HERMES_MEDIA_MATCH_WORKFLOW_AUTO_SUBMIT', '').strip().lower() in {'1', 'true', 'yes', 'on'}:
             return terminal('Media request execution is held because matcher auto-submit is enabled; no retry was issued.')
@@ -71,10 +71,20 @@ def build_prelude(agent, *, profile, turn, prompt):
             inputs = args.get('inputs') or {}
             if any(k in inputs and (type(inputs[k]) is not int or not 64 <= inputs[k] <= 1024) for k in ('width', 'height')):
                 return terminal('The requested image dimensions require separate approval; no image was submitted.')
-            allowed = {'workflow_id', 'prompt', 'negative_prompt', 'inputs', 'wait_for_completion', 'poll_interval_seconds', 'timeout_seconds'}
+            allowed = {'workflow_id', 'prompt', 'negative_prompt', 'wait_for_completion', 'poll_interval_seconds', 'timeout_seconds'}
             args = {k: v for k, v in args.items() if k in allowed}
+            args['governed_defaults'] = True
         except (ValueError, TypeError, KeyError, AttributeError):
             return terminal('Media workflow selection did not return an actionable result; no further submission was attempted.')
+        raw = yield ('', 'media_workflows', {'include_unavailable': False})
+        try:
+            inventory = json.loads(raw)
+            selected = next((row for row in inventory['workflows'] if row.get('id') == args['workflow_id']), None)
+            if (inventory.get('success') is not True or not selected or selected.get('submit_enabled') is not True
+                    or (selected.get('metadata') or {}).get('bounded_standard_image') is not True):
+                return terminal('This workflow is not an admitted bounded standard image; automatic submission is held.')
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return terminal('The admitted image boundary could not be established; no image was submitted.')
         raw = yield ('', 'media_generate', args)
         try:
             generated = json.loads(raw)
