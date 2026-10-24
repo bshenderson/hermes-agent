@@ -21,6 +21,13 @@ from agent.message_sanitization import deterministic_call_id
 from agent.transports.types import NormalizedResponse, build_tool_call
 from agent.turn_tool_round import run_tool_round
 
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class PreludeFinal:
+    """Trusted controller terminal text; tools still use native run_tool_round."""
+    text: str
+
 Prelude = Generator[tuple[str, str, dict], Optional[str], None]
 
 
@@ -33,7 +40,14 @@ def run_scripted_prelude(agent: Any, s: Any, prelude: Prelude) -> Any:
     while not agent._interrupt_requested:
         try:
             content, name, args = prelude.send(result)
-        except StopIteration:
+        except StopIteration as stopped:
+            if isinstance(stopped.value, PreludeFinal):
+                from types import SimpleNamespace
+                from agent.message_metadata import append_message
+                s.final_response = stopped.value.text
+                s._turn_exit_reason = "scripted_prelude_completed"
+                append_message(s.messages, {"role": "assistant", "content": s.final_response})
+                return SimpleNamespace(action="break", result=None)
             break
         s.finish_reason = "tool_calls"
         s.assistant_message = NormalizedResponse(

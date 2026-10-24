@@ -690,6 +690,8 @@ class OpenAICompatRoutesMixin:
         user_message: Any = (conversation_messages[-1].get("content", "") if conversation_messages else "")
         if not _content_has_visible_payload(user_message):
             return _invalid_request("No user message found in messages")
+        # Keep exact normalized user input before authored-artifact instructions.
+        media_request_prompt = user_message if isinstance(user_message, str) and messages[-1].get("role") == "user" else None
         artifact_root = None
         if artifact_origin:
             import hashlib
@@ -783,6 +785,7 @@ class OpenAICompatRoutesMixin:
         # above still applies; it grants no internal ingress or control authority.
         if media_file_turn is not None:
             run_kwargs["media_file_turn"] = media_file_turn
+            run_kwargs["media_request_prompt"] = media_request_prompt
         if provided_session_id and body.get("hermes_notification_category") == "diagnostic":
             run_kwargs["notification_category"] = "diagnostic"
         if stream:

@@ -4187,7 +4187,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_history_delivery: str = "", turn_author: Optional[dict[str, Any]] = None,
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
-        approval_session_key: Optional[str] = None, media_file_turn=None) -> tuple:
+        approval_session_key: Optional[str] = None, media_file_turn=None, media_request_prompt=None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4271,6 +4271,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     )
                     if relay_metadata:
                         conversation_kwargs["relay_metadata"] = relay_metadata
+                    # GXTD-753: trusted API provenance, native turn lease/tool rounds.
+                    if media_file_turn is not None and media_request_prompt is not None:
+                        from agent.media_request_action import build_prelude
+                        conversation_kwargs["prelude"] = build_prelude(
+                            agent, profile=request_profile, turn=media_file_turn,
+                            prompt=media_request_prompt)
                     approval_token = None
                     if approval_notify_callback is not None and approval_session_key:
                         # Same machinery as /v1/runs (_run_agent_sync): the contextvar scopes
