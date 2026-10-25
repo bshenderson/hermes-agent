@@ -1,8 +1,8 @@
 """1Password (`op` CLI) secret source.
 
 Users map env-var names to ``op://vault/item/field`` references in
-``secrets.onepassword.env``; each is resolved with one ``op read -- <ref>``
-call using whatever auth the user's ``op`` already has (``OP_SERVICE_ACCOUNT_TOKEN``
+``secrets.onepassword.env``; identical references are read once per pull and
+simple fields from the same item are batched. Calls use the user's existing auth (``OP_SERVICE_ACCOUNT_TOKEN``
 headless, ``OP_SESSION_*`` interactive) — Hermes never authenticates on the
 user's behalf, and failures never block startup. Complete pulls are cached
 in-process and under ``<hermes_home>/cache/op_cache.json`` (values only; auth
@@ -11,6 +11,7 @@ material is fingerprinted, never stored).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -161,6 +162,61 @@ def _run_op_read(op: Path, reference: str, *, account: str = "", token_value: st
     return value
 
 
+def _run_op_item_fields(op: Path, vault: str, item: str, fields: list[str], *,
+                        account: str, token_value: str) -> dict[str, str]:
+    """Fetch one item but return only uniquely selected, explicitly mapped fields."""
+    cmd = [str(op), "item", "get", "--vault", vault, "--format", "json"]
+    if account:
+        cmd += ["--account", account]
+    cmd += ["--", item]
+    proc = run_cli(cmd, env=_op_child_env(token_value), timeout=_OP_RUN_TIMEOUT,
+                   label="op", timeout_message="op item get timed out", stdin=None)
+    if proc.returncode:
+        raise RuntimeError(f"op item get exited {proc.returncode}")
+    try:
+        payload = json.loads(proc.stdout)
+        rows = payload["fields"]
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise ValueError("invalid fields")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise RuntimeError("op item get returned invalid item JSON") from exc
+    result = {}
+    for field in fields:
+        matches = [row for row in rows if field in (row.get("id"), row.get("label"))]
+        if len(matches) != 1:
+            raise RuntimeError("op item field missing or ambiguous")
+        value = matches[0].get("value")
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError("op item field empty or non-string")
+        result[field] = value
+    return result
+
+
+def _fetch_unique_refs(op: Path, refs: list[str], *, account: str,
+                       token_value: str) -> tuple[dict[str, str], dict[str, str]]:
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for ref in refs:
+        parts = ref[5:].split("/")
+        simple = (len(parts) == 3 and all(parts) and not any(p.startswith("-") for p in parts)
+                  and not any(c in ref for c in "%?#"))
+        key = tuple(parts[:2]) if simple else (ref,)
+        groups.setdefault(key, []).append(ref)
+    values, errors = {}, {}
+    for key, members in groups.items():
+        try:
+            if len(key) == 2 and len(members) > 1:
+                fields = [ref.rsplit("/", 1)[1] for ref in members]
+                selected = _run_op_item_fields(op, key[0], key[1], fields,
+                                               account=account, token_value=token_value)
+                values.update({ref: selected[ref.rsplit("/", 1)[1]] for ref in members})
+            else:
+                ref = members[0]
+                values[ref] = _run_op_read(op, ref, account=account, token_value=token_value)
+        except RuntimeError as exc:
+            errors.update({ref: str(exc) for ref in members})
+    return values, errors
+
+
 def fetch_onepassword_secrets(
     *, references: dict[str, str], account: str = "", token_env: str = _DEFAULT_TOKEN_ENV,
     binary: Optional[Path] = None, binary_path: str = "", use_cache: bool = True,
@@ -192,15 +248,16 @@ def fetch_onepassword_secrets(
                            "secrets.onepassword.binary_path to its absolute location.")
 
     secrets: dict[str, str] = {}
-    read_errors = 0
+    values, errors = _fetch_unique_refs(op, sorted(set(valid.values())),
+                                         account=account, token_value=token_value)
     for name in sorted(valid):
-        try:
-            secrets[name] = _run_op_read(op, valid[name], account=account, token_value=token_value)
-        except RuntimeError as exc:
-            warnings.append(str(exc))
-            read_errors += 1
+        ref = valid[name]
+        if ref in errors:
+            warnings.append(errors[ref])
+        else:
+            secrets[name] = values[ref]
 
-    if use_cache and not read_errors and secrets:
+    if use_cache and not errors and secrets:
         _STORE.store(cache_key, CachedFetch(secrets=dict(secrets), fetched_at=time.time()),
                      cache_ttl_seconds, home_path)
 
