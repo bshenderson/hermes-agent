@@ -19385,6 +19385,21 @@
             "title": "Models",
             "type": "array"
           },
+          "model_labels": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Labels"
+          },
           "total_models": {
             "anyOf": [
               {

@@ -118,11 +118,8 @@ export function ModelPicker({
     gw.request<ModelOptionsResult>('model.options', {
       ...(sessionId ? { session_id: sessionId } : {}),
       ...(initialRefresh ? { refresh: true } : {}),
-      // The TUI picker shows the full provider universe with setup
-      // affordances ("paste KEY to activate"), so opt into unconfigured
-      // rows — the backend now defaults to the configured subset for
-      // desktop chat pickers (#56974).
-      include_unconfigured: true
+      // Match the configured-provider CLI inventory; setup remains in hermes model/auth.
+      include_unconfigured: false
     })
       .then(raw => {
         const r = asRpcResult<ModelOptionsResult>(raw)
@@ -188,8 +185,10 @@ export function ModelPicker({
 
     // modelSearchText adds aliases for brand-less wire ids (e.g. Kimi
     // Coding `k3` still matches a "kimi" query).
-    return fuzzyRank(allModels, filter, modelSearchText).map(r => r.item)
-  }, [allModels, filter, stage])
+    return fuzzyRank(allModels, filter, mid =>
+      `${provider?.model_labels?.[mid] ?? ''} ${modelSearchText(mid)}`
+    ).map(r => r.item)
+  }, [allModels, filter, stage, provider?.model_labels])
 
   const models = filteredModels
 
@@ -823,7 +822,7 @@ export function ModelPicker({
             wrap="truncate-end"
           >
             {prefix}
-            {idx + 1}. {row}
+            {idx + 1}. {provider?.model_labels?.[row] ?? row}
           </Text>
         )
       })}

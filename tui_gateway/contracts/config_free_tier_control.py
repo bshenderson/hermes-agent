@@ -540,6 +540,7 @@ class ModelOptionProvider(OpenModel):
     slug: str
     name: str
     models: list[str] = Field(default_factory=list)
+    model_labels: dict[str, str] | None = None
     total_models: int | None = None
     is_current: bool | None = None
     is_user_defined: bool | None = None
