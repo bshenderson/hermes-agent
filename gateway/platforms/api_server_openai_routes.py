@@ -551,6 +551,7 @@ class _ResponsesStream:
 class OpenAICompatRoutesMixin:
     """/v1/chat/completions and /v1/responses handlers + SSE writers."""
 
+
     def _select_request_route(
         self, body: dict[str, Any], *, session_id, gateway_session_key, model_alias) -> tuple:
         """Resolve the model_routes alias + per-request overrides ->
@@ -632,6 +633,27 @@ class OpenAICompatRoutesMixin:
                 stream_q.put_nowait(None)
         agent_task.add_done_callback(_done)
         return agent_task, agent_ref
+
+    async def _handle_authored_receipt(self, request: web.Request) -> web.Response:
+        """Read only a completed turn's retained receipt; never invoke an agent."""
+        from hermes_constants import get_hermes_home
+        from gateway.platforms.api_server import _api_request_profile
+        from gateway.platforms.api_server_artifacts import artifact_binding, CompletedReceiptStore
+        auth_error = self._check_auth(request)
+        if auth_error is not None:
+            return auth_error
+        try:
+            body = await request.json()
+            origin = artifact_binding(body, profile=_api_request_profile.get() or 'default',
+                                      key=self._expected_api_key())
+            if not origin:
+                raise ValueError('Missing signed artifact origin')
+        except (ValueError, TypeError, KeyError):
+            return web.json_response({'error': 'Invalid authenticated artifact origin'}, status=400)
+        store = CompletedReceiptStore(get_hermes_home() / 'authored-receipts.sqlite3')
+        receipt = await asyncio.to_thread(store.get, origin)
+        return web.json_response({'status': 'completed', 'receipt': receipt} if receipt is not None
+                                 else {'status': 'unavailable'})
 
     async def _handle_chat_completions(self, request: web.Request) -> web.Response:
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
@@ -932,6 +954,25 @@ class OpenAICompatRoutesMixin:
         await response.prepare(request)
         return response
 
+    def _seal_authored_result(self, result, origin, root, session_key):
+        """Seal only a successful final result, independently of browser delivery."""
+        completed, partial, failed, error = _result_flags(result)
+        if (not origin or not root or not isinstance(result, dict)
+                or result.get('_notification_presentation_suppressed')
+                or not completed or partial or failed or error):
+            return None
+        from hermes_constants import get_hermes_home
+        from gateway.platforms.api_server_artifacts import artifact_event, CompletedReceiptStore
+        store = CompletedReceiptStore(get_hermes_home() / 'authored-receipts.sqlite3')
+        receipt = store.get(origin)
+        if receipt is None:
+            event = artifact_event(result.get('final_response') or '', binding=origin,
+                                   artifact_root=root, session_key=session_key or '')
+            receipt = event or {'schema': 'hermes.artifacts.v1', 'origin': dict(origin),
+                                'artifacts': [], 'errors': []}
+            store.save(origin, receipt)
+        return receipt if receipt.get('artifacts') or receipt.get('errors') else None
+
     async def _write_sse_chat_completion(
         self, request: web.Request, completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str | None = None,
@@ -940,14 +981,14 @@ class OpenAICompatRoutesMixin:
         disconnect the agent is interrupted (stops LLM calls), then its task wrapper cancelled."""
         from gateway.platforms.api_server import (
             _abandon_agent_task, _chat_usage_payload, _resolve_media_to_data_urls, _sse_frame)
-        response = await self._prepare_sse_response(request, session_id, gateway_session_key)
-
         def _chunk(delta: dict[str, Any], finish_reason=None, **extra) -> dict[str, Any]:
             return {"id": completion_id, "object": "chat.completion.chunk", "created": created,
                     "model": model,
                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}], **extra}
         content_sent = False
+        response = None
         try:
+            response = await self._prepare_sse_response(request, session_id, gateway_session_key)
             await response.write(_sse_frame(_chunk({"role": "assistant"})))
             async for delta in _iter_stream_items(stream_q, agent_task, response):
                 if delta is None:
@@ -985,10 +1026,8 @@ class OpenAICompatRoutesMixin:
                 err_msg = err_msg or str(agent_error)
             finish_reason = _finish_reason(completed, is_partial, is_failed, err_msg, agent_error)
             if artifact_origin and artifact_root and finish_reason == "stop" and isinstance(result, dict) and not result.get('_notification_presentation_suppressed'):
-                from gateway.platforms.api_server_artifacts import artifact_event
                 event = await asyncio.to_thread(
-                    artifact_event, result.get("final_response") or "", binding=artifact_origin, artifact_root=artifact_root,
-                    session_key=gateway_session_key or "")
+                    self._seal_authored_result, result, artifact_origin, artifact_root, gateway_session_key)
                 if event is not None:
                     await response.write(_sse_frame(event, event="hermes.artifacts"))
             finish_chunk = _chunk({}, finish_reason, usage=_chat_usage_payload(usage))
@@ -1021,12 +1060,23 @@ class OpenAICompatRoutesMixin:
             await response.write(_sse_frame(finish_chunk))
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            if artifact_origin and agent_task.done() and not agent_task.cancelled():
+                try:
+                    settled, _ = agent_task.result()
+                    await asyncio.to_thread(self._seal_authored_result, settled,
+                                            artifact_origin, artifact_root, gateway_session_key)
+                except Exception as exc:
+                    logger.warning('Completed authored receipt retention unavailable: %s', type(exc).__name__)
             await _abandon_agent_task(agent_ref, agent_task, "SSE client disconnected")
             logger.info("SSE client disconnected; interrupted agent task %s", completion_id)
+            if response is None:
+                raise  # No second HTTP response after a failed header preparation.
         except Exception:
             # Agent crashed mid-stream: an error chunk beats a TransferEncodingError.
             import traceback as _tb
             logger.error("Agent crashed mid-stream for %s: %s", completion_id, _tb.format_exc()[:300])
+            if response is None:
+                raise
             with suppress(Exception):
                 await response.write(_sse_frame(_chunk({}, "error")))
                 await response.write(b"data: [DONE]\n\n")

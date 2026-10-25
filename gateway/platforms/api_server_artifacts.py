@@ -10,10 +10,88 @@ import hashlib
 import os
 from pathlib import Path
 import stat
+import json
+import sqlite3
+import time
+from contextlib import contextmanager
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_TOTAL_BYTES = 10 * 1024 * 1024
 MAX_FILES = 5
+
+
+class CompletedReceiptStore:
+    """Finite transport retention only; never schedules or resumes producer work."""
+
+    TTL = 6 * 3600
+    CAPACITY = 256
+    MAX_RECEIPT_BYTES = 15 * 1024 * 1024
+    MAX_TOTAL_BYTES = 128 * 1024 * 1024
+
+    def __init__(self, path):
+        self.path = Path(path)
+        if self.path.parent.is_symlink() or not self.path.parent.is_dir():
+            raise ValueError('Receipt storage requires an existing trusted directory')
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                raise ValueError('Invalid receipt storage owner or type')
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        with self._connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS receipts '
+                       '(origin TEXT PRIMARY KEY, receipt TEXT NOT NULL, expires REAL NOT NULL)')
+
+    @contextmanager
+    def _connect(self):
+        db = sqlite3.connect(self.path, timeout=2)
+        try:
+            db.execute('PRAGMA synchronous=FULL')
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def _origin(origin):
+        keys = {'subject_id', 'chat_id', 'message_id', 'user_message_id'}
+        if (not isinstance(origin, dict) or set(origin) != keys
+                or any(not isinstance(v, str) or not 0 < len(v) <= 256 for v in origin.values())):
+            raise ValueError('Invalid receipt origin')
+        return json.dumps(origin, sort_keys=True, separators=(',', ':'))
+
+    def save(self, origin, receipt, *, now=None):
+        key = self._origin(origin)
+        if (not isinstance(receipt, dict) or receipt.get('schema') != 'hermes.artifacts.v1'
+                or receipt.get('origin') != origin):
+            raise ValueError('Invalid completed receipt')
+        encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        if len(encoded.encode()) > self.MAX_RECEIPT_BYTES:
+            raise ValueError('Completed receipt exceeds retention bound')
+        now = time.time() if now is None else now
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM receipts WHERE expires <= ?', (now,))
+            prior = db.execute('SELECT receipt FROM receipts WHERE origin=?', (key,)).fetchone()
+            if prior:
+                if prior[0] != encoded:
+                    raise ValueError('Completed receipt identity already sealed')
+                return
+            if db.execute('SELECT count(*) FROM receipts').fetchone()[0] >= self.CAPACITY:
+                raise RuntimeError('Completed receipt retention is full')
+            retained = db.execute('SELECT COALESCE(SUM(length(CAST(receipt AS BLOB))),0) FROM receipts').fetchone()[0]
+            if retained + len(encoded.encode()) > self.MAX_TOTAL_BYTES:
+                raise RuntimeError('Completed receipt retention byte budget is full')
+            db.execute('INSERT INTO receipts VALUES (?,?,?)', (key, encoded, now + self.TTL))
+
+    def get(self, origin, *, now=None):
+        key = self._origin(origin)
+        now = time.time() if now is None else now
+        with self._connect() as db:
+            row = db.execute('SELECT receipt FROM receipts WHERE origin=? AND expires>?', (key, now)).fetchone()
+        return json.loads(row[0]) if row else None
 MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
         '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf',
         '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv',
