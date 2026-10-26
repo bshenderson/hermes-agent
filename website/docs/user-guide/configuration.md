@@ -1668,6 +1668,49 @@ Each entry supports the same three knobs as any auxiliary task config:
 
 `fallback_chain` is available on any auxiliary task — `compression`, `vision`, `approval`, `skills_hub`, `mcp`, etc.
 
+### Explicit fail-closed auxiliary recovery
+
+`auxiliary.<task>.recovery_policy: fail_closed` opts `call_llm` and
+`async_call_llm` out of implicit recovery. Use it when a helper must fail rather
+than send its input to another provider, model or endpoint:
+
+```yaml
+auxiliary:
+  profile_describer:
+    provider: custom
+    base_url: http://127.0.0.1:8081/v1
+    model: local-helper
+    recovery_policy: fail_closed
+```
+
+The effective caller/task route must identify a concrete provider and model.
+Named custom providers are supported; anonymous `custom` requires an explicit
+endpoint. `auto`, `main`, and virtual MoA routes are refused rather than resolved
+through discovery. A missing client raises `AuxiliaryClientUnavailable` without
+walking configured chains or trying the main model. A failed request raises its
+original exception without the auxiliary transient-retry, parameter-repair,
+credential-refresh/rotation or cross-provider recovery ladders. Vision also skips
+automatic vision-provider rescue. A nonempty `fallback_chain` cannot override
+this policy. The policy is captured before client acquisition for the whole call.
+
+Absent, null, or `legacy` retains existing behavior. Other values (including an
+empty string or boolean) raise `ValueError` before route resolution. Plugin task
+inheritance carries the policy as a non-route setting; an explicit null or
+`legacy` on the child selects legacy behavior. This setting does not change
+feature enablement, provider priority, authentication or profile permissions.
+
+An empty ordinary-task `fallback_chain: []` alone is not fail-closed: capacity
+errors may still recover to the primary model. Compression's existing explicit
+empty-chain protection remains unchanged, including its legacy same-route
+recovery behavior. Do not substitute this stricter policy for compression's
+existing contract unintentionally.
+
+This is a Hermes auxiliary-call recovery policy, not a network/export allowlist
+or a provider-internal retry guarantee. Provider adapters and same-client stream
+negotiation have their own behavior; callers consuming raw streams or raw clients
+own any later recovery. It does not constrain a caller's separately submitted
+request, an upstream proxy's routing, or a remote provider's internal routing.
+
 ### Native vision embed budgets (top-level `vision:`)
 
 Separate from `auxiliary.vision` (which picks the describer model): when the *main* model is vision-capable, `vision_analyze` and browser screenshots embed real pixels into tool results that are re-sent every later turn. `vision.embed_target_bytes` (default `262144`, clamped 64 KiB..4 MiB) sizes one embed; `vision.max_calls_per_image` caps how often the same image may be embedded per session (unset = 3 inside delegated subagents, unlimited for the main agent; `0` = unlimited). See [Vision → Native embeds ride the session](./features/vision.md#native-embeds-ride-the-session-visionembed_target_bytes-and-visionmax_calls_per_image).

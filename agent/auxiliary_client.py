@@ -4249,6 +4249,16 @@ def _compression_fallbacks_disabled(task: Optional[str]) -> bool:
     return task == "compression" and _get_auxiliary_task_config(task).get("fallback_chain") == []
 
 
+def _fail_closed_aux_recovery(task: Optional[str]) -> bool:
+    """Validate the opt-in policy before resolution; absence/null preserve legacy recovery."""
+    policy = _get_auxiliary_task_config(task).get("recovery_policy") if task else None
+    if policy is None or policy == "legacy":
+        return False
+    if policy == "fail_closed":
+        return True
+    raise ValueError(f"auxiliary.{task}.recovery_policy must be legacy or fail_closed")
+
+
 def _try_payment_fallback(
     failed_provider: str, task: str | None = None, reason: str = "payment error", *,
     failed_base_url: str = "", failure_scope: Any = None, main_runtime: Optional[dict[str, Any]] = None,
@@ -7159,7 +7169,7 @@ def _create_with_progress_once(
 
 
 def _create_with_progress_impl(
-    client: Any, kwargs: Dict[str, Any], task: Optional[str] = None, *, force_stream: bool = False
+    client: Any, kwargs: dict[str, Any], task: Optional[str] = None, *, force_stream: bool = False
 ) -> Any:
     """create() that streams (and re-aggregates, ticking the hook per substantive chunk) when a
     progress hook is active or the provider is stream-only; plain ``create(**kwargs)`` otherwise
@@ -7448,10 +7458,20 @@ def _resolve_call_client(
     api_key: Optional[str], resolved_provider: str, resolved_model: Optional[str],
     resolved_base_url: Optional[str], resolved_api_key: Optional[str],
     resolved_api_mode: Optional[str], main_runtime: Optional[dict[str, Any]], async_mode: bool,
+    fail_closed: bool = False,
 ) -> _ResolvedAuxRoute:
     """Resolve the client for one aux call: vision chain, or cached text client with the
     explicit-provider fallback_chain / auto-chain rescue; RuntimeError when nothing is configured."""
     effective_provider = resolved_provider
+    if fail_closed:
+        # Do not enter vision discovery, unavailable-client rescue or a main-model net.
+        client, final_model = _get_cached_client(
+            resolved_provider, resolved_model, async_mode=async_mode, base_url=resolved_base_url,
+            api_key=resolved_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
+            is_vision=(task == "vision"), task=task)
+        if client is None:
+            raise AuxiliaryClientUnavailable(f"Configured provider unavailable for fail-closed task={task}")
+        return _ResolvedAuxRoute(client, final_model, resolved_provider, resolved_provider)
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
@@ -7518,6 +7538,7 @@ class _PreparedAuxRequest(NamedTuple):
     effective_timeout: float
     effective_extra_body: dict[str, Any]
     base_info: str
+    fail_closed: bool = False
 
 
 def _prepare_aux_request(
@@ -7531,8 +7552,19 @@ def _prepare_aux_request(
     """Shared head of call_llm/async_call_llm: resolve route + client, publish it, build request kwargs.
     Sync-only: compression fast lane, per-request ``extra_headers``, and ``base_info`` falling
     back to the resolved base_url when the client exposes none."""
+    fail_closed = _fail_closed_aux_recovery(task)
+    if fail_closed:
+        configured_provider = provider or _get_auxiliary_task_config(task or "").get("provider")
+        if str(configured_provider or "").strip().lower().removeprefix("custom:") in {"moa", "main"}:
+            raise ValueError("fail_closed auxiliary recovery requires a concrete provider, not moa/main")
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
+    if fail_closed and (
+        _normalize_aux_provider(resolved_provider) in {"auto", "moa", "main"}
+        or not str(resolved_model or "").strip()
+        or (_normalize_aux_provider(resolved_provider) == "custom" and not resolved_base_url)
+    ):
+        raise ValueError("fail_closed auxiliary recovery requires a concrete provider/model and an explicit custom endpoint")
     if api_mode:
         resolved_api_mode = api_mode
     effective_extra_body = _get_task_extra_body(task)
@@ -7542,6 +7574,7 @@ def _prepare_aux_request(
         resolved_provider=resolved_provider, resolved_model=resolved_model,
         resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
         resolved_api_mode=resolved_api_mode, main_runtime=main_runtime, async_mode=async_mode,
+        fail_closed=fail_closed,
     )
     effective_timeout = _effective_aux_timeout(task, timeout)
     # Codex-Responses-only: real SDK clients reject an unrecognized ``no_progress_timeout``
@@ -7585,7 +7618,7 @@ def _prepare_aux_request(
     return _PreparedAuxRequest(
         client, final_model, kwargs, resolved_provider, request_provider, resolved_model,
         resolved_base_url, resolved_api_key, resolved_api_mode, effective_timeout,
-        effective_extra_body, base_info)
+        effective_extra_body, base_info, fail_closed)
 
 
 class _LadderStep(NamedTuple):
@@ -8273,6 +8306,8 @@ def _call_llm_impl(
         try:
             return _primary(provider=request_provider, base_url=req.base_info)
         except Exception as transient_err:
+            if req.fail_closed:
+                raise
             if not _should_retry_same_provider(task, transient_err, ""):
                 raise
             _max_transient_retries = _transient_retry_count()
@@ -8291,6 +8326,8 @@ def _call_llm_impl(
                     _last_transient = retry_transient
             raise _last_transient
     except Exception as first_err:
+        if req.fail_closed:
+            raise
         def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
@@ -8431,12 +8468,16 @@ async def _async_call_llm_impl(
             return await _primary(provider=request_provider, base_url=req.base_info)
         except Exception as transient_err:
             # The async Codex adapter wraps the sync stream via to_thread: same TimeoutError here.
+            if req.fail_closed:
+                raise
             if not _should_retry_same_provider(task, transient_err, " (async)"):
                 raise
             logger.info("Auxiliary %s (async): transient transport error; retrying "
                         "once on the same provider before fallback: %s", task or "call", transient_err)
             return await _primary()
     except Exception as first_err:
+        if req.fail_closed:
+            raise
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":

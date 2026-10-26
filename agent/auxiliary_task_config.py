@@ -71,7 +71,7 @@ def _layer_over_inherited(inherited: dict[str, Any], user: dict[str, Any]) -> di
               or bool(str(user.get("base_url") or "").strip()))
     merged = {k: v for k, v in inherited.items() if not (pinned and k in _AUX_ROUTE_KEYS)}
     for key, value in user.items():
-        if value == "" and not (pinned and key in _AUX_ROUTE_KEYS):
+        if value == "" and key != "recovery_policy" and not (pinned and key in _AUX_ROUTE_KEYS):
             continue
         if key == "provider" and not pinned:
             continue

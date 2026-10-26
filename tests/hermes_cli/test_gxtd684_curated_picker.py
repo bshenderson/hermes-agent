@@ -42,9 +42,10 @@ def test_cli_renders_human_labels_but_selects_wire_id(monkeypatch):
     cli._render_scroll_list_panel = lambda *a, **k: a[3]
     assert CLITuiMixin._get_model_picker_display_fragments(cli)[0] == "Human A"
     selected = []
-    monkeypatch.setattr(switching, "_switch_model_from", lambda cli, mid, **kw: selected.append(mid))
-    monkeypatch.setattr(switching, "_run_confirm_and_apply", lambda *a, **kw: None)
-    cli._close_model_picker = lambda: None
-    cli._confirm_and_apply_model_switch_result = lambda *a: None
+    def switch(cli, mid, **kw):
+        selected.append(mid)
+        return SimpleNamespace(success=False)
+    monkeypatch.setattr(switching, "_switch_model_from", switch)
+    cli._commit_picker_result = lambda *a: None
     CLIModelSwitchMixin._handle_model_picker_selection(cli)
     assert selected == ["wire-a"]

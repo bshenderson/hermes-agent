@@ -1045,12 +1045,26 @@ def _moa_provider_row(current_provider: str = "") -> dict | None:
         from hermes_cli.config import load_config
         from hermes_cli.moa_config import normalize_moa_config
 
-        cfg = normalize_moa_config(load_config().get("moa") or {})
+        config = load_config()
+        cfg = normalize_moa_config(config.get("moa") or {})
         models = list(cfg.get("presets", {}).keys())
         if not models:
             return None
+        labels = {}
+        for name, preset in cfg["presets"].items():
+            aggregator = preset["aggregator"]
+            model = aggregator["model"]
+            provider = str(aggregator.get("provider") or "").removeprefix("custom:")
+            provider_config = (config.get("providers") or {}).get(provider) or {}
+            meta = provider_config.get("models") or {}
+            entry = meta.get(model) if isinstance(meta, dict) else None
+            label = entry.get("display_name", model) if isinstance(entry, dict) else model
+            label = (provider_config.get("model_labels") or {}).get(model, label)
+            advisors = sum(ref.get("enabled", True) for ref in preset["reference_models"])
+            labels[name] = f"Ensemble: {label} + {advisors} advisors ({name})"
         return _row(
             "moa", "Mixture of Agents", (current_provider or "").lower() == "moa", models=models,
+            model_labels=labels,
             total_models=len(models), source="virtual", authenticated=True, auth_type="virtual",
             warning="Aggregator is the acting model billed for the run; references only advise once per user turn by default.")
     except Exception:
