@@ -15,6 +15,7 @@ import uuid
 from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
+from agent.i18n import t
 from gateway.platforms.api_server_tool_results import bounded_tool_result_projection
 
 try:

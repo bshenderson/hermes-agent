@@ -72,6 +72,12 @@ def bounded_tool_result_projection(tool_name: Any, result: Any) -> Optional[dict
     """
 
     name = str(tool_name or "")
+    from gateway.platforms.api_server_operational_results import project, render
+    operational = project(name, result)
+    if operational is not None:
+        if 'operational_result' in operational:
+            operational['operational_result_text'] = render(operational['operational_result'])
+        return operational
     if name not in _MEDIA_RESULT_TOOL_NAMES:
         return None
     payload = _parse_payload(result)
