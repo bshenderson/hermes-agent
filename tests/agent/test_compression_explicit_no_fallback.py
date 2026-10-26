@@ -57,7 +57,7 @@ def test_missing_client_cannot_auto_discover(compression_config, monkeypatch, as
 def test_missing_or_nonempty_chain_keeps_existing_recovery(compression_config, monkeypatch, chain):
     compression_config(chain)
     route = SimpleNamespace(task="compression", tag="", resolved_provider="custom:gpu0",
-                            final_model="compressor", route_info={}, client=None)
+                            final_model="compressor", route_info={}, client=None, base_info="")
     for name in ("_try_configured_fallback_chain", "_try_main_fallback_chain", "_try_payment_fallback"):
         monkeypatch.setattr(ac, name, Mock(return_value=(None, None, "")))
     main = Mock(return_value=(None, None, ""))
