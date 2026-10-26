@@ -185,9 +185,9 @@ export function ModelPicker({
 
     // modelSearchText adds aliases for brand-less wire ids (e.g. Kimi
     // Coding `k3` still matches a "kimi" query).
-    return fuzzyRank(allModels, filter, mid =>
-      `${provider?.model_labels?.[mid] ?? ''} ${modelSearchText(mid)}`
-    ).map(r => r.item)
+    return fuzzyRank(allModels, filter, mid => `${provider?.model_labels?.[mid] ?? ''} ${modelSearchText(mid)}`).map(
+      r => r.item
+    )
   }, [allModels, filter, stage, provider?.model_labels])
 
   const models = filteredModels
