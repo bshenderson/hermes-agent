@@ -2333,7 +2333,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         model_options: Optional[dict[str, Any]] = None, route: Optional[dict[str, Any]] = None,
         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
         room_dispatch: Optional[dict[str, Any]] = None,
-        room_execution_policy: Optional[dict[str, Any]] = None) -> Any:
+        room_execution_policy: Optional[dict[str, Any]] = None,
+        precision_availability_eligible: bool = False) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
@@ -2361,6 +2362,30 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
             gateway_session_key=gateway_session_key, session_id=session_id)
         user_config = _load_gateway_config()
+        from gateway.platforms.api_server_precision_availability import (
+            AvailabilityRefused, probe_local, select_runtime)
+        try:
+            precision_selection = select_runtime(
+                enabled=(precision_availability_eligible is True
+                    and (user_config.get('api_server') or {}).get('precision_availability') is True),
+                profile=_api_request_profile.get(), model=model,
+                explicit_selection=bool(confirmed_runtime_lock or session_override or session_model
+                    or request_model or request_provider or route
+                    or str(runtime_kwargs.get('base_url')).rstrip('/') != 'http://127.0.0.1:8090/v1'),
+                probe=lambda selected: probe_local(runtime_kwargs.get('base_url'), selected),
+                resolve=lambda provider, selected: self._resolve_provider_runtime(
+                    provider, target_model=selected, required=True))
+        except AvailabilityRefused as exc:
+            raise _ProviderAuthResolutionError(str(exc)) from exc
+        if precision_selection and precision_selection['runtime'] is not None:
+            # Replace endpoint/credential identity as one bundle, including absent
+            # fields. Never pair a cloud provider with the old local bearer.
+            for key in _RUNTIME_AGENT_OVERRIDE_KEYS:
+                runtime_kwargs.pop(key, None)
+            _apply_runtime_agent_overrides(runtime_kwargs, precision_selection['runtime'])
+            model = precision_selection['model']
+        if precision_selection and precision_selection['notice'] and status_callback:
+            status_callback('route', precision_selection['notice'])
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
         # Same gate the messaging gateway and TUI apply: ``display.interim_assistant_messages``
         # off means no callback is installed, so mid-turn commentary never leaves the agent.
@@ -2391,7 +2416,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "status_callback": status_callback,
             "session_db": self._ensure_session_db(),
             # Same fallback provider chain as Telegram/Discord/Slack.
-            "fallback_model": None if confirmed_runtime_lock else GatewayRunner._load_fallback_model(),
+            "fallback_model": None if confirmed_runtime_lock or precision_selection else GatewayRunner._load_fallback_model(),
             "reasoning_config": request_reasoning_config,
             "gateway_session_key": gateway_session_key,
             # The session's provider from the previous request, so its queued recall reaches this turn
@@ -2400,6 +2425,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
         agent = AIAgent(**agent_kwargs)
+        if precision_selection and precision_selection['local_no_wait']:
+            overrides = dict(getattr(agent, 'request_overrides', {}) or {})
+            overrides['extra_body'] = {**(overrides.get('extra_body') or {}), 'homelab_queue_timeout_seconds': 0}
+            agent.request_overrides = overrides
+        agent._hermes_precision_availability = ({key: precision_selection[key]
+            for key in ('model', 'local_no_wait', 'notice')} if precision_selection else None)
         route_source = (
             "session_model_lock" if confirmed_runtime_lock
             else "session_model_override" if session_override
@@ -4235,7 +4266,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         reasoning_callback=reasoning_callback, status_callback=status_callback,
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
-                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
+                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
+                        precision_availability_eligible=(not conversation_history and not resume_unanswered_turn))
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if resume_unanswered_turn:
