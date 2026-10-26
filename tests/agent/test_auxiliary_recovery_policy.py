@@ -127,6 +127,29 @@ def test_fail_closed_success(peer, mode, task):
     assert calls[0][1]["max_tokens"] == 64
 
 
+@pytest.mark.parametrize("status", [200, 401, 409, 429, 503])
+def test_profile_describer_consumer_preserves_state_on_route_failure(peer, tmp_path, status):
+    from hermes_cli import profile_describer, profiles
+
+    calls, state, configure, _ = peer
+    state["status"] = status
+    configure()
+    profiles.write_profile_meta(tmp_path, description="previous", description_auto=True)
+    before = (tmp_path / "profile.yaml").read_bytes()
+    outcome = profile_describer.describe_profile("default", timeout=2)
+    assert outcome.ok is (status == 200), outcome.reason
+    assert len(calls) == 1
+    path, body = calls[0]
+    assert path.startswith("/aux/")
+    assert body["model"] == "fixture-aux"
+    assert body["max_tokens"] == 64
+    if status == 200:
+        assert outcome.description == "AUX"
+        assert profiles.read_profile_meta(tmp_path)["description"] == "AUX"
+    else:
+        assert (tmp_path / "profile.yaml").read_bytes() == before
+
+
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("policy", ["absent", None, "legacy"])
 def test_legacy_empty_chain_still_recovers_to_primary(peer, mode, policy):
