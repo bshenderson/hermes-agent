@@ -259,6 +259,9 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[dict[str, Any]] = Non
         "args": list(getattr(agent, "acp_args", []) or []), "routed": False,
     }
     task = _background_review_task_config(task_cfg)
+    from tools.delegate_tool_config import _merge_request_overrides
+    slot_overrides = {"extra_body": task["extra_body"]} if isinstance(task.get("extra_body"), dict) and task["extra_body"] else None
+    parent["request_overrides"] = _merge_request_overrides(parent["request_overrides"], slot_overrides) or {}
     task_provider, task_model, task_base_url, task_api_key = (
         str(task.get(key, "")).strip() or None for key in ("provider", "model", "base_url", "api_key")
     )
@@ -275,7 +278,7 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[dict[str, Any]] = Non
         return {
             "provider": rp.get("provider") or task_provider, "model": rp.get("model") or task_model,
             **{key: rp.get(key) for key in ("api_key", "base_url", "api_mode", "credential_pool", "command")},
-            "request_overrides": dict(rp.get("request_overrides") or {}),
+            "request_overrides": _merge_request_overrides(rp.get("request_overrides"), slot_overrides) or {},
             "args": list(rp.get("args") or []), "routed": True,
         }
     except Exception as e:

@@ -462,7 +462,7 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                 temperature, kwargs = self._summary_request(prompt)
                 if getattr(self, '_use_call_llm', False):
                     from agent.auxiliary_client import call_llm
-                    response = call_llm(provider=self._llm_provider, temperature=temperature, **kwargs)
+                    response = call_llm(task="compression", provider=self._llm_provider, temperature=temperature, **kwargs)
                 else:
                     response = self.client.chat.completions.create(**kwargs)
                 return self._finish_summary(response)
@@ -481,7 +481,7 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                 temperature, kwargs = self._summary_request(prompt)
                 if getattr(self, '_use_call_llm', False):
                     from agent.auxiliary_client import async_call_llm
-                    response = await async_call_llm(provider=self._llm_provider, temperature=temperature, **kwargs)
+                    response = await async_call_llm(task="compression", provider=self._llm_provider, temperature=temperature, **kwargs)
                 else:
                     response = await self._get_async_client().chat.completions.create(**kwargs)
                 return self._finish_summary(response)
