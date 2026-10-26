@@ -2334,7 +2334,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
         room_dispatch: Optional[dict[str, Any]] = None,
         room_execution_policy: Optional[dict[str, Any]] = None,
-        precision_availability_eligible: bool = False) -> Any:
+        precision_availability_eligible: bool = False,
+        precision_availability_profile: Optional[str] = None) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
@@ -2368,7 +2369,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             precision_selection = select_runtime(
                 enabled=(precision_availability_eligible is True
                     and (user_config.get('api_server') or {}).get('precision_availability') is True),
-                profile=_api_request_profile.get(), model=model,
+                # Executor workers do not inherit the request ContextVar. The
+                # caller passes only the profile captured at authenticated ingress.
+                profile=precision_availability_profile or _api_request_profile.get(), model=model,
                 explicit_selection=bool(confirmed_runtime_lock or session_override or session_model
                     or request_model or request_provider or route
                     or str(runtime_kwargs.get('base_url')).rstrip('/') != 'http://127.0.0.1:8090/v1'),
@@ -4267,7 +4270,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
                         session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-                        precision_availability_eligible=(not conversation_history and not resume_unanswered_turn))
+                        precision_availability_eligible=(not conversation_history and not resume_unanswered_turn),
+                        precision_availability_profile=request_profile)
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if resume_unanswered_turn:
