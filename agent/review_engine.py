@@ -11,6 +11,7 @@ Surfaces (CLI/gateway ``/review``, TUI/Desktop) snapshot, call :func:`start_revi
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -147,11 +148,14 @@ def _load_review_credentials_cfg() -> Optional[dict[str, Any]]:
     if not isinstance(review, dict):
         return None
 
-    cfg = {k: str(review.get(k) or "").strip() for k in ("provider", "model", "base_url", "api_key", "api_mode")}
+    cfg: dict[str, Any] = {k: str(review.get(k) or "").strip() for k in ("provider", "model", "base_url", "api_key", "api_mode")}
     if cfg["provider"].lower() == "auto":
         cfg["provider"] = ""
-    if not (cfg["provider"] or cfg["model"] or cfg["base_url"]):
+    has_extra = isinstance(review.get("extra_body"), dict) and bool(review["extra_body"])
+    if not (cfg["provider"] or cfg["model"] or cfg["base_url"] or has_extra):
         return None
+    if has_extra:
+        cfg["request_overrides"] = {"extra_body": copy.deepcopy(review["extra_body"])}
     return cfg
 
 
