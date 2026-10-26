@@ -39,6 +39,7 @@ def _make_agent(
     agent.base_url = "https://openrouter.ai/api/v1"
     agent.api_key = "sk-test"
     agent.api_mode = "chat_completions"
+    agent.max_tokens = None
     agent.quiet_mode = True
     agent.log_prefix = ""
     agent.compression_enabled = compression_enabled
