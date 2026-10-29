@@ -64,6 +64,24 @@ def test_missing_required_plugin_fails_before_turn():
             tools.constrain_agent(value, POLICY)
 
 
+def test_deferred_required_tool_materializes_without_discovery_bridge(monkeypatch):
+    import model_tools
+    value = SimpleNamespace(tools=[{'function': {'name': 'tool_search'}}])
+    captured = {}
+
+    def raw_definitions(**kwargs):
+        captured.update(kwargs)
+        return agent().tools
+
+    monkeypatch.setattr(model_tools, 'get_tool_definitions', raw_definitions)
+    with context.bound(origin()):
+        tools.constrain_agent(value, POLICY)
+        assert value.valid_tool_names == {'govcon_action', 'web_search'}
+        assert captured['enabled_toolsets'] == POLICY['toolsets']
+        assert captured['skip_tool_search_assembly'] is True
+        assert tools.dispatch_denial(value, 'tool_call') is not None
+
+
 def test_other_origin_cannot_reuse_agent():
     value = agent()
     with context.bound(origin()):

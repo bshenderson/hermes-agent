@@ -33,6 +33,20 @@ def constrain_agent(agent, policy):
     allowed = frozenset(policy['allowed_tools'])
     tools = [tool for tool in agent.tools or [] if tool['function']['name'] in allowed]
     names = {tool['function']['name'] for tool in tools}
+    if not set(policy['required_tools']) <= names and any(
+        tool['function']['name'] == 'tool_search' for tool in agent.tools or []
+    ):
+        # Progressive discovery may defer the required plugin. Materialize only
+        # the server-selected toolsets, then apply the same exact ceiling; never
+        # expose discovery/dispatch bridges or alter ordinary worker settings.
+        from model_tools import get_tool_definitions
+
+        raw = get_tool_definitions(
+            enabled_toolsets=policy['toolsets'], quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+        tools = [tool for tool in raw if tool['function']['name'] in allowed]
+        names = {tool['function']['name'] for tool in tools}
     if not set(policy['required_tools']) <= names:
         raise ValueError('required_authenticated_domain_tool_unavailable')
     # Immutable ceiling plus copied origin survives schema refresh. Dispatch
