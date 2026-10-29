@@ -2390,6 +2390,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if precision_selection and precision_selection['notice'] and status_callback:
             status_callback('route', precision_selection['notice'])
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        from agent.domain_action_tools import policy_for_current
+        domain_tool_policy = policy_for_current(user_config)
+        if domain_tool_policy is not None:
+            if room_dispatch is not None:
+                raise ValueError('domain_and_room_execution_modes_are_exclusive')
+            enabled_toolsets = list(domain_tool_policy['toolsets'])
         # Same gate the messaging gateway and TUI apply: ``display.interim_assistant_messages``
         # off means no callback is installed, so mid-turn commentary never leaves the agent.
         if not resolve_display_setting(user_config, "api_server", "interim_assistant_messages", True):
@@ -2428,6 +2434,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
         agent = AIAgent(**agent_kwargs)
+        from agent.domain_action_tools import constrain_agent
+        try:
+            constrain_agent(agent, domain_tool_policy)
+        except Exception:
+            # Construction has already checked out this turn's memory owner;
+            # the caller cannot check it in if construction never returns.
+            self._memory_sessions.checkin(agent)
+            raise
         if precision_selection and precision_selection['local_no_wait']:
             overrides = dict(getattr(agent, 'request_overrides', {}) or {})
             overrides['extra_body'] = {**(overrides.get('extra_body') or {}), 'homelab_queue_timeout_seconds': 0}
@@ -4222,7 +4236,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_history_delivery: str = "", turn_author: Optional[dict[str, Any]] = None,
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
-        approval_session_key: Optional[str] = None, media_file_turn=None, media_request_prompt=None) -> tuple:
+        approval_session_key: Optional[str] = None, media_file_turn=None, media_request_prompt=None,
+        domain_action_turn=None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4252,15 +4267,18 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     browser_control_principal=request_browser_control_principal,
                     browser_control_transport_family=request_browser_control_transport_family,
                     session_history_delivery=session_history_delivery,
-                    user_id=(media_file_turn or {}).get("subject", ""))
+                    user_id=(domain_action_turn or media_file_turn or {}).get("subject", ""))
                 agent = None
                 media_file_token = None
+                domain_action_token = None
                 from agent.notification_presentation import notification_turn
                 from gateway.warning_notifications import diagnostic_turn_muted
                 muted = diagnostic_turn_muted({"notification_category": notification_category}, "api_server")
                 try:
                     from agent.media_file_context import bind as bind_media_file_turn
                     media_file_token = bind_media_file_turn(media_file_turn)
+                    from agent.domain_action_context import bind as bind_domain_action_turn
+                    domain_action_token = bind_domain_action_turn(domain_action_turn)
                     agent = self._create_agent(
                         ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
                         stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
@@ -4356,6 +4374,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         exc._notification_presentation_suppressed = True
                     raise
                 finally:
+                    if domain_action_token is not None:
+                        from agent.domain_action_context import reset as reset_domain_action_turn
+                        reset_domain_action_turn(domain_action_token)
                     if media_file_token is not None:
                         from agent.media_file_context import reset as reset_media_file_turn
                         reset_media_file_turn(media_file_token)

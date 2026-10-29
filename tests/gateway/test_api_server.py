@@ -562,6 +562,50 @@ def auth_adapter():
 
 class TestAgentExecution:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize('fail', [False, True])
+    async def test_domain_authority_is_bound_in_real_executor_and_reset(self, adapter, fail):
+        from agent.domain_action_context import accept, current, sign
+        native = {'subject_id': 'fixture-actor',
+                  'chat_id': '11111111-1111-4111-8111-111111111111',
+                  'message_id': '22222222-2222-4222-8222-222222222222',
+                  'user_message_id': '33333333-3333-4333-8333-333333333333'}
+        signed = sign({'hermes_chat_context': native, 'messages': []},
+                      subject='fixture-actor', groups=['govcon-admin'],
+                      profile='default', key='fixture-key')
+        authority = accept(signed, profile='default', key='fixture-key')
+        agent = MagicMock()
+        agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+        seen = []
+
+        def capture(**_kwargs):
+            seen.append(current()['subject'])
+            if fail:
+                raise RuntimeError('fixture turn failed')
+            return {'final_response': 'scoped'}
+
+        agent.run_conversation.side_effect = capture
+        with patch.object(adapter, '_create_agent', return_value=agent):
+            if fail:
+                with pytest.raises(RuntimeError, match='fixture turn failed'):
+                    await adapter._run_agent(user_message='status', conversation_history=[],
+                                             session_id='domain-fixture', domain_action_turn=authority)
+            else:
+                result, _ = await adapter._run_agent(user_message='status', conversation_history=[],
+                                                    session_id='domain-fixture', domain_action_turn=authority)
+                assert result['final_response'] == 'scoped'
+            assert seen == ['fixture-actor']
+            # The next ordinary turn must not inherit this executor's last actor.
+            def absent(**_kwargs):
+                with pytest.raises(ValueError):
+                    current()
+                return {'final_response': 'ordinary'}
+            agent.run_conversation.side_effect = absent
+            await adapter._run_agent(user_message='hello', conversation_history=[],
+                                     session_id='ordinary-fixture')
+        with pytest.raises(ValueError):
+            current()
+
+    @pytest.mark.asyncio
     async def test_run_agent_uses_session_id_as_task_id(self, adapter):
         mock_agent = MagicMock()
         mock_agent.run_conversation.return_value = {"final_response": "ok"}
@@ -1167,6 +1211,38 @@ class TestToolsetsEndpoint:
 
 
 class TestChatCompletionsEndpoint:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('case', ['valid', 'tamper', 'foreign_session'])
+    async def test_domain_action_http_envelope_precedes_chat_validation(self, auth_adapter, case):
+        from agent.chat_location import native_context, sign_context
+        from agent.domain_action_context import sign
+        origin = {'chat_id': '11111111-1111-4111-8111-111111111111',
+                  'message_id': '22222222-2222-4222-8222-222222222222',
+                  'user_message_id': '33333333-3333-4333-8333-333333333333'}
+        body = {'model': 'test', 'messages': [{'role': 'user', 'content': 'Status only.'}],
+                'hermes_artifact_transport': 'inline-v1'}
+        native = native_context(user_id='fixture-actor', metadata=origin)
+        body['hermes_chat_context'] = sign_context(native, body=body, user_id='fixture-actor',
+                                                  profile='default', key='sk-secret')
+        payload = sign(body, subject='fixture-actor', groups=['govcon-admin'],
+                       profile='default', key='sk-secret')
+        if case == 'tamper':
+            payload['hermes_domain_action_context']['groups'] = ['homelab-admins']
+        run = AsyncMock(return_value=({'final_response': 'status', 'messages': [], 'api_calls': 1},
+                                      {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}))
+        async with TestClient(TestServer(_create_app(auth_adapter))) as client:
+            with patch.object(auth_adapter, '_run_agent', run):
+                headers = {'Authorization': 'Bearer sk-secret'}
+                if case == 'foreign_session':
+                    headers['X-Hermes-Session-Id'] = 'another-users-session'
+                response = await client.post('/v1/chat/completions', json=payload,
+                                             headers=headers)
+                assert response.status == (200 if case == 'valid' else 400), await response.text()
+        if case != 'valid':
+            run.assert_not_awaited()
+        else:
+            assert run.call_args.kwargs['domain_action_turn']['groups'] == ['govcon-admin']
+
     @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):
         app = _create_app(adapter)

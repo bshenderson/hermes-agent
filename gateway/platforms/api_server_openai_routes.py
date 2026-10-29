@@ -677,6 +677,19 @@ class OpenAICompatRoutesMixin:
         if not messages or not isinstance(messages, list):
             return _invalid_request("Missing or invalid 'messages' field")
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        # Validate the outer final-body grant before its enclosed chat signature.
+        # This grants no action authority to ordinary unsigned API calls.
+        domain_action_turn = None
+        if "hermes_domain_action_context" in body:
+            from agent.domain_action_context import accept as accept_domain_action_turn
+            try:
+                domain_action_turn = accept_domain_action_turn(
+                    body, profile=_api_request_profile.get() or "default", key=self._expected_api_key())
+            except (ValueError, TypeError, KeyError):
+                return _invalid_request("Invalid authenticated domain action turn")
+            if request.headers.get('X-Hermes-Session-Id'):
+                return _invalid_request('Domain action turns use their authenticated chat history only')
+            body.pop("hermes_domain_action_context")
         from gateway.platforms.api_server_artifacts import artifact_binding
         try:
             artifact_origin = artifact_binding(
@@ -780,6 +793,13 @@ class OpenAICompatRoutesMixin:
             first_user = next(
                 (cm.get("content", "") for cm in conversation_messages if cm.get("role") == "user"), "")
             session_id = _derive_chat_session_id(system_prompt, first_user, _api_request_profile.get())
+        if domain_action_turn is not None:
+            import hashlib
+            domain_scope = hashlib.sha256(json.dumps([
+                domain_action_turn['subject'], domain_action_turn['profile'],
+                domain_action_turn['chat_id']]).encode()).hexdigest()[:32]
+            session_id = 'owui-domain-' + domain_scope
+            gateway_session_key = 'owui-domain:' + domain_scope
         if media_file_turn is not None:
             import hashlib
             media_scope = hashlib.sha256(json.dumps([media_file_turn["subject"], media_file_turn["chat_id"]]).encode()).hexdigest()[:32]
@@ -809,6 +829,8 @@ class OpenAICompatRoutesMixin:
         if media_file_turn is not None:
             run_kwargs["media_file_turn"] = media_file_turn
             run_kwargs["media_request_prompt"] = media_request_prompt
+        if domain_action_turn is not None:
+            run_kwargs['domain_action_turn'] = domain_action_turn
         if provided_session_id and body.get("hermes_notification_category") == "diagnostic":
             run_kwargs["notification_category"] = "diagnostic"
         if stream:
