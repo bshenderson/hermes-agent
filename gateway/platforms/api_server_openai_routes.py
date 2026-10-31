@@ -736,8 +736,12 @@ class OpenAICompatRoutesMixin:
             namespace = hashlib.sha256(json.dumps(artifact_origin, sort_keys=True).encode()).hexdigest()
             artifact_root = Path(get_hermes_home()) / 'cache' / 'scratch' / 'authored-artifacts' / namespace
             artifact_instruction = (
-                '\nThis authenticated OWUI turn supports native authored-file delivery. '
-                f'Write any requested output files under {artifact_root}/ (create the directory if needed). '
+                '\nThis authenticated OWUI turn supports native authored-file delivery as a '
+                'capability, not a request to create a file. '
+                'If the user did not request an output file, answer inline; do not create an attachment. '
+                'Honor explicit no-file and no-tool instructions; this delivery guidance does not override them. '
+                'Only for output files actually requested by the user: '
+                f'write them under {artifact_root}/ (create the directory if needed). '
                 'Return each completed output with MEDIA:<absolute-path> on its own line. '
                 'The transport uploads those bytes as native chat attachments after the turn; '
                 'do not call Media/ComfyUI for technical diagrams or portable documents. '
