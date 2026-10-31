@@ -604,6 +604,12 @@ def _endpoint_scoped_context_length(model: str, base_url: str) -> Optional[int]:
         port = parsed.port
     except ValueError:
         return None
+    # Exact public admission alias, not the broad Gemma family training window.
+    # Explicit user/model overrides retain their existing precedence above this
+    # metadata path; stale disk cache must not invent a 256K deployed context.
+    if (base_url.rstrip('/') == 'http://127.0.0.1:8090/v1'
+            and model == 'gemma4-31b-nvfp4-64k'):
+        return 65536
     # Only canonical https://host[:443]/path with no credentials/query/fragment.
     if parsed.scheme.lower() != "https" or port not in (None, 443) or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         return None

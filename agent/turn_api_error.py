@@ -79,6 +79,17 @@ def handle_api_error(
     if agent.thinking_callback:
         agent.thinking_callback("")
 
+    if getattr(agent, '_hermes_precision_no_replay', False) is True:
+        # Initial availability is not permission to replay a dispatched generation,
+        # shrink context after refusal, rotate credentials or migrate a tool-owning
+        # agent. Even a connection failure can have an unknown native outcome.
+        message = ('Precision generation stopped: capacity refused or outcome uncertain. '
+                   'No automatic retry or route migration; prior tool effects are not replayed.')
+        return _verdict('return', {
+            'final_response': message, 'messages': messages, 'api_calls': api_call_count,
+            'completed': False, 'failed': True, 'error': message,
+            'failure_reason': 'precision_no_replay', 'failure_retryable': False})
+
     _recovered, active_system_prompt = recover_before_classification(
         agent, api_error, messages=messages, api_messages=api_messages, api_kwargs=api_kwargs,
         active_system_prompt=active_system_prompt,

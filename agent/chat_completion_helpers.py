@@ -3358,6 +3358,9 @@ class _StreamingCall(StreamingWaitMonitor):
         stream ending with no finish_reason is a drop, not a completion: return a
         partial-stream stub so the loop fails fast instead of executing empty
         args or stamping "stop"."""
+        if (getattr(self.agent, '_hermes_precision_no_replay', False) is True
+                and finish_reason is None):
+            raise EmptyStreamError('Precision stream completion is unconfirmed; no automatic continuation.')
         full_content = "".join(content_parts) or None
         full_reasoning = "".join(reasoning_parts) or None
         if not full_reasoning and full_content:
@@ -3629,6 +3632,11 @@ class _StreamingCall(StreamingWaitMonitor):
         if self._request_cancelled["value"]:
             logger.debug("Streaming worker caught %s after request cancellation — exiting without retry.", type(e).__name__)
             return False
+        if getattr(self.agent, '_hermes_precision_no_replay', False) is True:
+            # The wire request may already have executed. Compatibility retries,
+            # partial-tool recovery and 5xx probes are still physical reissues.
+            self.result["error"] = e
+            return False
         _is_timeout = isinstance(e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout))
         # ReadError: abort/reset mid-body (stale-kill shutdown under a parked reader,
         # ECONNRESET) — the retry loop owns recovery.
@@ -3732,7 +3740,8 @@ class _StreamingCall(StreamingWaitMonitor):
         that decision, so a pending stop must not buy one more request.
         True = handled (caller must not overwrite result); False = propagate ``e``.
         """
-        if getattr(self.agent, "_interrupt_requested", False):
+        if (getattr(self.agent, '_hermes_precision_no_replay', False) is True
+                or getattr(self.agent, "_interrupt_requested", False)):
             return False
         status = _extract_status_code(e)
         if status is None or status < 500 or self.deltas_were_sent["yes"]:
@@ -4030,6 +4039,8 @@ class _StreamingCall(StreamingWaitMonitor):
         if self.agent._interrupt_requested:  # worker returned early before the monitor saw the flag
             raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
         if self.result["error"] is not None:
+            if getattr(self.agent, '_hermes_precision_no_replay', False) is True:
+                raise self.result["error"]
             if self.deltas_were_sent["yes"]:
                 return self._partial_stream_stub()
             raise self.result["error"]

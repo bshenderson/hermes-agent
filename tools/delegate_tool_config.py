@@ -433,9 +433,20 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         return _direct_endpoint_credentials(values, explicit_request_overrides)
     if not values["provider"]:
         # Pure inherit; explicit request_overrides still merge OVER the parent's.
+        parent_overrides = getattr(parent_agent, "request_overrides", None)
+        if (getattr(parent_agent, '_hermes_precision_no_replay', False) is True
+                and values['model'] and values['model'] != parent_agent.model):
+            # Producer explicitly chose another model, e.g. substantial Sparky.
+            # The parent's tightening-only Gemma condition is not child intent.
+            import copy
+            parent_overrides = copy.deepcopy(parent_overrides or {})
+            extra = parent_overrides.get('extra_body')
+            if isinstance(extra, dict):
+                extra.pop('homelab_precision_warm_only', None)
+                extra.pop('homelab_queue_timeout_seconds', None)
         return _credential_bundle(
             values["model"], None, None, None, None,
-            _merge_request_overrides(getattr(parent_agent, "request_overrides", None), explicit_request_overrides),
+            _merge_request_overrides(parent_overrides, explicit_request_overrides),
         )
     return _runtime_provider_credentials(values, explicit_request_overrides)
 

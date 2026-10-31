@@ -14,6 +14,7 @@ PROFILES = frozenset({'homelab-coordinator', 'homelab-coding', 'homelab-ops',
 MODELS = frozenset({'operator-default', 'precision-default'})
 CLOUD_PROVIDER = 'openai-codex'
 CLOUD_MODEL = 'gpt-6.1-sol'
+ELASTIC_MODEL = 'gemma4-31b-nvfp4-64k'
 
 
 class AvailabilityRefused(RuntimeError):
@@ -22,7 +23,7 @@ class AvailabilityRefused(RuntimeError):
 
 def probe_local(base_url, model):
     """Read a fixed loopback origin only: no bearer, redirect or prompt transport."""
-    if str(base_url).rstrip('/') != 'http://127.0.0.1:8090/v1' or model not in MODELS:
+    if str(base_url).rstrip('/') != 'http://127.0.0.1:8090/v1' or model not in MODELS | {ELASTIC_MODEL}:
         raise ValueError('unsupported admission destination')
     def unique(pairs):
         out = {}
@@ -45,6 +46,29 @@ def probe_local(base_url, model):
         return observed
     finally:
         connection.close()
+
+
+def select_elastic_runtime(*, enabled, profile, model, explicit_selection, intent, probe):
+    """Local homelab grant only; selection is not admission or replay authority.
+
+    Intent belongs to the producer configuration, never inferred from user text.
+    Existing cloud grants remain solely in select_runtime, not this path.
+    """
+    if enabled is not True or profile not in PROFILES or model not in MODELS or explicit_selection:
+        return None
+    if intent not in {'responsive', 'substantial'}:
+        raise AvailabilityRefused('Precision producer intent must be responsive or substantial. No model or tools dispatched.')
+    candidates = (ELASTIC_MODEL, 'precision-default') if intent == 'responsive' else ('precision-default',)
+    for candidate in candidates:
+        try:
+            observed = probe(candidate)
+        except Exception:
+            observed = None
+        if isinstance(observed, dict) and observed.get('available') is True:
+            return {'model': candidate, 'runtime': None, 'local_no_wait': True,
+                    'warm_only': candidate == ELASTIC_MODEL,
+                    'notice': f'Precision route: {candidate} ({intent}); selected before execution. Later contention refuses without route replay.'}
+    raise AvailabilityRefused('Precision service unavailable; Gemma/Sparky not ready. No model or tools dispatched.')
 
 
 def select_runtime(*, enabled, profile, model, explicit_selection, probe, resolve):

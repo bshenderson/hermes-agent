@@ -2335,6 +2335,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         room_dispatch: Optional[dict[str, Any]] = None,
         room_execution_policy: Optional[dict[str, Any]] = None,
         precision_availability_eligible: bool = False,
+        precision_elastic_eligible: bool = False,
         precision_availability_profile: Optional[str] = None) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
@@ -2364,11 +2365,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             gateway_session_key=gateway_session_key, session_id=session_id)
         user_config = _load_gateway_config()
         from gateway.platforms.api_server_precision_availability import (
-            AvailabilityRefused, probe_local, select_runtime)
+            AvailabilityRefused, probe_local, select_runtime, select_elastic_runtime)
+        precision_config = user_config.get('api_server') or {}
+        elastic_first = precision_config.get('precision_elastic_first') is True
         try:
-            precision_selection = select_runtime(
-                enabled=(precision_availability_eligible is True
-                    and (user_config.get('api_server') or {}).get('precision_availability') is True),
+            selector = select_elastic_runtime if elastic_first else select_runtime
+            precision_selection = selector(
+                enabled=((precision_elastic_eligible if elastic_first else precision_availability_eligible) is True
+                    and (elastic_first or precision_config.get('precision_availability') is True)),
                 # Executor workers do not inherit the request ContextVar. The
                 # caller passes only the profile captured at authenticated ingress.
                 profile=precision_availability_profile or _api_request_profile.get(), model=model,
@@ -2376,8 +2380,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     or request_model or request_provider or route
                     or str(runtime_kwargs.get('base_url')).rstrip('/') != 'http://127.0.0.1:8090/v1'),
                 probe=lambda selected: probe_local(runtime_kwargs.get('base_url'), selected),
-                resolve=lambda provider, selected: self._resolve_provider_runtime(
-                    provider, target_model=selected, required=True))
+                **({'intent': precision_config.get('precision_intent')} if elastic_first else {
+                    'resolve': lambda provider, selected: self._resolve_provider_runtime(
+                        provider, target_model=selected, required=True)}))
         except AvailabilityRefused as exc:
             raise _ProviderAuthResolutionError(str(exc)) from exc
         if precision_selection and precision_selection['runtime'] is not None:
@@ -2386,6 +2391,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             for key in _RUNTIME_AGENT_OVERRIDE_KEYS:
                 runtime_kwargs.pop(key, None)
             _apply_runtime_agent_overrides(runtime_kwargs, precision_selection['runtime'])
+        if precision_selection:
             model = precision_selection['model']
         if precision_selection and precision_selection['notice'] and status_callback:
             status_callback('route', precision_selection['notice'])
@@ -2445,9 +2451,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if precision_selection and precision_selection['local_no_wait']:
             overrides = dict(getattr(agent, 'request_overrides', {}) or {})
             overrides['extra_body'] = {**(overrides.get('extra_body') or {}), 'homelab_queue_timeout_seconds': 0}
+            if precision_selection.get('warm_only'):
+                overrides['extra_body']['homelab_precision_warm_only'] = True
             agent.request_overrides = overrides
         agent._hermes_precision_availability = ({key: precision_selection[key]
             for key in ('model', 'local_no_wait', 'notice')} if precision_selection else None)
+        agent._hermes_precision_no_replay = bool(elastic_first and precision_selection)
         route_source = (
             "session_model_lock" if confirmed_runtime_lock
             else "session_model_override" if session_override
@@ -4289,6 +4298,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         requested_provider=requested_provider, model_options=model_options, route=route,
                         session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
                         precision_availability_eligible=(not conversation_history and not resume_unanswered_turn),
+                        # Local-only selection may carry completed history into a NEW
+                        # turn. An unanswered/tool-owning tail is not a new turn.
+                        precision_elastic_eligible=(not resume_unanswered_turn and
+                            (not conversation_history or
+                             (conversation_history[-1].get('role') == 'assistant' and
+                              not conversation_history[-1].get('tool_calls')))),
                         precision_availability_profile=request_profile)
                     if agent_ref is not None:
                         agent_ref[0] = agent

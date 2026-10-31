@@ -293,6 +293,9 @@ def _build_child_agent(
                     release_or_close(child_session_db)
             raise
     child._print_fn = getattr(parent_agent, "_print_fn", None)
+    # Adopted local service owner keeps terminal no-replay behavior in children,
+    # including generations after tool effects. No cloud grant is inherited.
+    child._hermes_precision_no_replay = getattr(parent_agent, '_hermes_precision_no_replay', False) is True
     _apply_child_cache_ttl(child)
     if child_session_db is not None:
         child._owns_session_db = True  # released by the child's close(), never by the parent
