@@ -1752,6 +1752,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         routes.extend(_api_runs._http_routes(self))
         from gateway.platforms.api_server_protected_events import http_routes
         routes.extend(http_routes(self))
+        from gateway.platforms.api_server_source_citations import http_routes as citation_routes
+        routes.extend(citation_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))
@@ -3207,16 +3209,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "updated_at": time.time()}}
         title = body.get("title")
 
+        from hermes_cli.profiles import get_active_profile_name
+        owner_profile = _api_request_profile.get() or get_active_profile_name()
+
         def _atomic(conn):
             # One BEGIN IMMEDIATE write: a concurrent same-id create blocks and sees the row.
             if conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone():
                 return None, "exists"
             conn.execute(
                 """INSERT INTO sessions (
-                   id, source, model, model_config, system_prompt, started_at
-                ) VALUES (?, ?, ?, ?, ?, ?)""",
+                   id, source, model, model_config, system_prompt, started_at, profile_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (session_id, source, model_name, json.dumps(model_config) if model_config else None,
-                 system_prompt, time.time()))
+                 system_prompt, time.time(), owner_profile))
             if title is not None:
                 clean_title = db.sanitize_title(str(title))
                 if clean_title:
