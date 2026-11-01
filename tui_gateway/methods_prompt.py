@@ -473,6 +473,10 @@ def _truncate_history_for_submit(rid, sid, session, params, requested_rebind_ids
     # Writes through _session_db (profile sessions own their state.db).
     fields = {}
     with _session_db(session) as db:
+        if db is None:
+            # Unknown durable custody is not permission to discard warm context.
+            # Refuse before history/version changes or the caller admits a turn.
+            return _err(rid, 5008, "failed to persist history truncation: session database is unavailable"), {}
         if db is not None:
             try:
                 # NULL session_key (old CLI-origin sessions) would trip an FK violation.

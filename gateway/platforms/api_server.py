@@ -1750,6 +1750,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job)]
         routes.extend(_room_grants._http_routes(self))
         routes.extend(_api_runs._http_routes(self))
+        from gateway.platforms.api_server_protected_events import http_routes
+        routes.extend(http_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))
@@ -3094,12 +3096,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _conversation_history_for_session(self, session_id: str) -> list[dict[str, Any]]:
         db = await self._ensure_session_db_async()
         if db is None:
-            return []
+            raise web.HTTPServiceUnavailable(reason="Session history is unavailable")
         try:
-            return await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+            return await asyncio.to_thread(db.get_messages_as_conversation, session_id, repair_alternation=True)
         except Exception as exc:
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
-            return []
+            # An unreadable journal cannot authorize a history-free turn. This also
+            # covers retry, streaming and internal-run callers of this loader.
+            raise web.HTTPServiceUnavailable(reason="Session history could not be restored") from exc
 
     async def run_internal_session_turn(self, *, session_id: str, text: str, profile: str,
                                         notification_category: str = "result") -> None:

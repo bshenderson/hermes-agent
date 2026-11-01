@@ -5642,6 +5642,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         preservation_previous_summary = self._previous_summary
         try:
             preservation_budget = lossless_settings()
+            from agent.protected_events import collect_events
+            if not preservation_budget and collect_events(self, canonical_messages):
+                raise CompressionBudgetError('protected events require lossless checkpoint custody')
             source_records = (collect_records(self, canonical_messages, preservation_budget['output_tokens'])
                               if preservation_budget else None)
         except CompressionBudgetError as error:
@@ -5731,6 +5734,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                 refuse_replacement(self, preservation_previous_summary, error)
                 return canonical_messages
             self._previous_summary = self._strip_summary_prefix(summary)
+            from agent.protected_events import carry_stream
+            carry_stream(canonical_messages, result)
         return result
 
     def _assemble_compressed(

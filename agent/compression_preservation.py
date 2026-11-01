@@ -13,6 +13,17 @@ START = '<!-- HERMES_SOURCE_COMMITMENTS_V1 -->'
 END = '<!-- END_HERMES_SOURCE_COMMITMENTS_V1 -->'
 _FIELD = re.compile(r'^\s*(?:owner|assignee|deadline|due)\s*:', re.IGNORECASE)
 _MODAL = re.compile(r'\b(?:must|shall|deadline|due)\b', re.IGNORECASE)
+_CONSTRAINT = re.compile(
+    r"\b(?:do\s+not|don't|never|must\s+not|shall\s+not|hold|withhold|"
+    r"prohibit\w*|forbid\w*|unauthori[sz]ed|no[- ]replay|no[- ]retry)\b",
+    re.IGNORECASE,
+)
+_PROVENANCE = re.compile(
+    r'\b(?:private|privacy|confidential|domain|provenance)\b', re.IGNORECASE,
+)
+_UNCERTAIN = re.compile(
+    r'\b(?:unknown|uncertain|unresolved|unverified|indeterminate)\b', re.IGNORECASE,
+)
 _NAMED = re.compile(r"^(?:[^:\n]{1,80}:\s*)?[A-Z][\w'-]{0,60}\s+(?i:must|shall)\b")
 _DATE = re.compile(
     r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\b'
@@ -56,6 +67,8 @@ def decode_records(content):
 def collect_records(compressor, messages, output_tokens):
     """Harvest the unpruned canonical transcript, never prior model prose."""
     from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
+    from agent.protected_events import collect_events, SourceRecords
+    events = collect_events(compressor, messages)
     records = []
     for message in messages:
         if not isinstance(message, dict) or message.get('role') == 'system':
@@ -64,6 +77,10 @@ def collect_records(compressor, messages, output_tokens):
         if compressor._is_context_summary_message(message):
             if not message.get(COMPRESSED_SUMMARY_METADATA_KEY):
                 raise CompressionBudgetError('untyped handoff cannot establish source custody')
+            from agent.protected_events import decode_events
+            prior_events = decode_events(_text(_handoff_only_content(message.get('content'))))
+            if prior_events != events[:len(prior_events)]:
+                raise CompressionBudgetError('historical protected events lack matching session journal')
             records.extend(decode_records(_handoff_only_content(message.get('content'))))
             fresh = compressor._strip_context_summary_handoff_message(message)
         if fresh is None:
@@ -77,8 +94,10 @@ def collect_records(compressor, messages, output_tokens):
         text = '\n\n'.join(serialized).removeprefix(prefix)
         records.extend(line for line in text.splitlines()
                        if _FIELD.search(line) or _NAMED.search(line)
+                       or _CONSTRAINT.search(line) or _PROVENANCE.search(line)
+                       or _UNCERTAIN.search(line)
                        or (_MODAL.search(line) and _DATE.search(line)))
-    records = list(dict.fromkeys(records))
+    records = SourceRecords(dict.fromkeys(records), events)
     if len(encode_records(records).encode('utf-8')) > min(8192, output_tokens // 2):
         raise CompressionBudgetError('source commitments exceed preservation budget')
     return records
@@ -93,7 +112,8 @@ def encode_records(records):
                                   ('[', '\\u005b'), (']', '\\u005d')):
             value = value.replace(char, replacement)
         quoted.append(value)
-    return CONTRACT + '\n' + START + '\n' + '\n'.join(quoted) + '\n' + END
+    from agent.protected_events import encode_events
+    return CONTRACT + '\n' + START + '\n' + '\n'.join(quoted) + '\n' + END + encode_events(getattr(records, 'events', []))
 
 
 def _bounded_user_excerpts(turns, byte_budget):
@@ -173,6 +193,8 @@ def frame_summary(compressor, summary, records, output_tokens):
     """Restore trusted records only AFTER all model-summary normalization."""
     from agent.context_compressor import _redact_compaction_text
     summary = compressor._strip_summary_prefix(summary)
+    from agent.protected_events import strip_model_events
+    summary = strip_model_events(summary)
     # Model-emitted blocks never acquire source authority.
     while START in summary:
         before, rest = summary.split(START, 1)
@@ -196,6 +218,7 @@ def validate_checkpoint(compressor, original, candidate, output_tokens):
     if candidate == original:
         return
     expected = collect_records(compressor, original, output_tokens)
+    from agent.protected_events import decode_events, encode_events
     actual, handoff_bytes, carriers = [], 0, 0
     for message in candidate:
         if not compressor._is_context_summary_message(message):
@@ -204,6 +227,9 @@ def validate_checkpoint(compressor, original, candidate, output_tokens):
             raise CompressionBudgetError('untyped handoff cannot establish source custody')
         content = _handoff_only_content(message.get('content'))
         text = _text(content)
+        events = decode_events(text)
+        if events != expected.events or (events and encode_events(events) not in text):
+            raise CompressionBudgetError('final checkpoint protected events differ from canonical journal')
         decoded = decode_records(text)
         if encode_records(decoded) not in text:
             raise CompressionBudgetError('checkpoint source encoding is not canonical sanitized data')
@@ -229,11 +255,15 @@ def refuse_replacement(compressor, previous_summary, error):
     compressor._last_summary_error = str(error)
 
 
-def reject_installation(agent, original, candidate, attempt):
+def reject_installation(agent, original, candidate, attempt, *, in_place=True):
     """Final gate after caller transforms; rollback remains attempt-owned."""
     from agent.context_compressor import lossless_settings
     compressor = agent.context_compressor
     try:
+        from agent.protected_events import collect_events
+        events = collect_events(compressor, original, session_id=agent.session_id)
+        if not in_place and events:
+            raise CompressionBudgetError('session-local protected events prohibit implicit session rotation')
         budget = lossless_settings()
         if budget:
             validate_checkpoint(compressor, original, candidate, budget['output_tokens'])

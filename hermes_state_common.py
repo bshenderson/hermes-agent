@@ -501,6 +501,16 @@ CREATE TABLE IF NOT EXISTS session_model_usage (
     PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
 );
 
+CREATE TABLE IF NOT EXISTS operator_protected_events (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+    event_order INTEGER NOT NULL,
+    issuer TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    PRIMARY KEY (session_id, event_order),
+    UNIQUE (session_id, issuer, submission_id)
+);
+
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
