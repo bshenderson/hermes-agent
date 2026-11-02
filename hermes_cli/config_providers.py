@@ -563,6 +563,13 @@ def get_custom_provider_context_length(
         ctx = _positive_int(model_cfg.get("context_length"))
         if ctx is not None:
             return ctx
+    # Exact deployed Gemma metadata precedes a provider-wide Sparky default, not
+    # an explicit per-model override. Startup and compressor both use this helper.
+    if model == 'gemma4-31b-nvfp4-64k':
+        from agent.model_metadata import _endpoint_scoped_context_length
+        deployed = _endpoint_scoped_context_length(model, base_url)
+        if deployed is not None:
+            return deployed
     # Entry-level ``context_length`` (a documented key) backs every model the entry serves when no
     # per-model override exists; without it the /model switch re-derivation fell to the hardcoded
     # catalog while a cold start honoured the same setting via model.context_length (#98387).

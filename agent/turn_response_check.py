@@ -18,6 +18,7 @@ from agent.turn_api_call import stop_thinking_spinner
 from agent.turn_failure_copy import invalid_response_failure_reason, provider_label_for, site_copy, stamp_failure
 from agent.turn_truncation import handle_content_policy_refusal, recover_from_truncation
 from agent.turn_usage import record_response_usage
+from hermes_constants import PARTIAL_STREAM_STUB_ID
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -120,6 +121,15 @@ def check_api_response(
 
     # Silent stop: the response box / tool messages that follow are more informative.
     thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
+
+    if (getattr(agent, '_hermes_precision_no_replay', False) is True
+            and getattr(response, 'id', None) == PARTIAL_STREAM_STUB_ID):
+        message = ('Precision stream completion is unconfirmed. '
+                   'No automatic continuation or route migration; prior tool effects are not replayed.')
+        return _verdict('return', {
+            'final_response': message, 'messages': messages, 'api_calls': api_call_count,
+            'completed': False, 'failed': True, 'error': message,
+            'failure_reason': 'precision_no_replay', 'failure_retryable': False})
 
     if not agent.quiet_mode:
         agent._vprint(f"{agent.log_prefix}⏱️  API call completed in {api_duration:.2f}s")
@@ -255,6 +265,15 @@ def retry_invalid_response(
             active_system_prompt=active_system_prompt, retry_count=retry_count,
             compression_attempts=compression_attempts, result=result,
         )
+
+    if getattr(agent, '_hermes_precision_no_replay', False) is True:
+        thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
+        message = ('Precision generation returned an invalid response. '
+                   'No automatic retry or route migration; prior tool effects are not replayed.')
+        return _verdict('return', {
+            'final_response': message, 'messages': messages, 'api_calls': api_call_count,
+            'completed': False, 'failed': True, 'error': message,
+            'failure_reason': 'precision_no_replay', 'failure_retryable': False})
 
     agent._invoke_api_request_error_hook(
         task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,

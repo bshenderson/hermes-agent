@@ -1750,6 +1750,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job)]
         routes.extend(_room_grants._http_routes(self))
         routes.extend(_api_runs._http_routes(self))
+        from gateway.platforms.api_server_protected_events import http_routes
+        routes.extend(http_routes(self))
+        from gateway.platforms.api_server_source_citations import http_routes as citation_routes
+        routes.extend(citation_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))
@@ -2335,6 +2339,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         room_dispatch: Optional[dict[str, Any]] = None,
         room_execution_policy: Optional[dict[str, Any]] = None,
         precision_availability_eligible: bool = False,
+        precision_elastic_eligible: bool = False,
         precision_availability_profile: Optional[str] = None) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
@@ -2364,11 +2369,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             gateway_session_key=gateway_session_key, session_id=session_id)
         user_config = _load_gateway_config()
         from gateway.platforms.api_server_precision_availability import (
-            AvailabilityRefused, probe_local, select_runtime)
+            AvailabilityRefused, probe_local, select_runtime, select_elastic_runtime)
+        precision_config = user_config.get('api_server') or {}
+        elastic_first = precision_config.get('precision_elastic_first') is True
         try:
-            precision_selection = select_runtime(
-                enabled=(precision_availability_eligible is True
-                    and (user_config.get('api_server') or {}).get('precision_availability') is True),
+            selector = select_elastic_runtime if elastic_first else select_runtime
+            precision_selection = selector(
+                enabled=((precision_elastic_eligible if elastic_first else precision_availability_eligible) is True
+                    and (elastic_first or precision_config.get('precision_availability') is True)),
                 # Executor workers do not inherit the request ContextVar. The
                 # caller passes only the profile captured at authenticated ingress.
                 profile=precision_availability_profile or _api_request_profile.get(), model=model,
@@ -2376,8 +2384,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     or request_model or request_provider or route
                     or str(runtime_kwargs.get('base_url')).rstrip('/') != 'http://127.0.0.1:8090/v1'),
                 probe=lambda selected: probe_local(runtime_kwargs.get('base_url'), selected),
-                resolve=lambda provider, selected: self._resolve_provider_runtime(
-                    provider, target_model=selected, required=True))
+                **({'intent': precision_config.get('precision_intent')} if elastic_first else {
+                    'resolve': lambda provider, selected: self._resolve_provider_runtime(
+                        provider, target_model=selected, required=True)}))
         except AvailabilityRefused as exc:
             raise _ProviderAuthResolutionError(str(exc)) from exc
         if precision_selection and precision_selection['runtime'] is not None:
@@ -2386,10 +2395,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             for key in _RUNTIME_AGENT_OVERRIDE_KEYS:
                 runtime_kwargs.pop(key, None)
             _apply_runtime_agent_overrides(runtime_kwargs, precision_selection['runtime'])
+        if precision_selection:
             model = precision_selection['model']
         if precision_selection and precision_selection['notice'] and status_callback:
             status_callback('route', precision_selection['notice'])
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        from agent.domain_action_tools import policy_for_current
+        domain_tool_policy = policy_for_current(user_config)
+        if domain_tool_policy is not None:
+            if room_dispatch is not None:
+                raise ValueError('domain_and_room_execution_modes_are_exclusive')
+            enabled_toolsets = list(domain_tool_policy['toolsets'])
         # Same gate the messaging gateway and TUI apply: ``display.interim_assistant_messages``
         # off means no callback is installed, so mid-turn commentary never leaves the agent.
         if not resolve_display_setting(user_config, "api_server", "interim_assistant_messages", True):
@@ -2428,12 +2444,23 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
         agent = AIAgent(**agent_kwargs)
+        from agent.domain_action_tools import constrain_agent
+        try:
+            constrain_agent(agent, domain_tool_policy)
+        except Exception:
+            # Construction has already checked out this turn's memory owner;
+            # the caller cannot check it in if construction never returns.
+            self._memory_sessions.checkin(agent)
+            raise
         if precision_selection and precision_selection['local_no_wait']:
             overrides = dict(getattr(agent, 'request_overrides', {}) or {})
             overrides['extra_body'] = {**(overrides.get('extra_body') or {}), 'homelab_queue_timeout_seconds': 0}
+            if precision_selection.get('warm_only'):
+                overrides['extra_body']['homelab_precision_warm_only'] = True
             agent.request_overrides = overrides
         agent._hermes_precision_availability = ({key: precision_selection[key]
             for key in ('model', 'local_no_wait', 'notice')} if precision_selection else None)
+        agent._hermes_precision_no_replay = bool(elastic_first and precision_selection)
         route_source = (
             "session_model_lock" if confirmed_runtime_lock
             else "session_model_override" if session_override
@@ -3071,12 +3098,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _conversation_history_for_session(self, session_id: str) -> list[dict[str, Any]]:
         db = await self._ensure_session_db_async()
         if db is None:
-            return []
+            raise web.HTTPServiceUnavailable(reason="Session history is unavailable")
         try:
-            return await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+            return await asyncio.to_thread(db.get_messages_as_conversation, session_id, repair_alternation=True)
         except Exception as exc:
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
-            return []
+            # An unreadable journal cannot authorize a history-free turn. This also
+            # covers retry, streaming and internal-run callers of this loader.
+            raise web.HTTPServiceUnavailable(reason="Session history could not be restored") from exc
 
     async def run_internal_session_turn(self, *, session_id: str, text: str, profile: str,
                                         notification_category: str = "result") -> None:
@@ -3180,16 +3209,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "updated_at": time.time()}}
         title = body.get("title")
 
+        from hermes_cli.profiles import get_active_profile_name
+        owner_profile = _api_request_profile.get() or get_active_profile_name()
+
         def _atomic(conn):
             # One BEGIN IMMEDIATE write: a concurrent same-id create blocks and sees the row.
             if conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone():
                 return None, "exists"
             conn.execute(
                 """INSERT INTO sessions (
-                   id, source, model, model_config, system_prompt, started_at
-                ) VALUES (?, ?, ?, ?, ?, ?)""",
+                   id, source, model, model_config, system_prompt, started_at, profile_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (session_id, source, model_name, json.dumps(model_config) if model_config else None,
-                 system_prompt, time.time()))
+                 system_prompt, time.time(), owner_profile))
             if title is not None:
                 clean_title = db.sanitize_title(str(title))
                 if clean_title:
@@ -4222,7 +4254,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_history_delivery: str = "", turn_author: Optional[dict[str, Any]] = None,
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
-        approval_session_key: Optional[str] = None, media_file_turn=None, media_request_prompt=None) -> tuple:
+        approval_session_key: Optional[str] = None, media_file_turn=None, media_request_prompt=None,
+        domain_action_turn=None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4252,15 +4285,18 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     browser_control_principal=request_browser_control_principal,
                     browser_control_transport_family=request_browser_control_transport_family,
                     session_history_delivery=session_history_delivery,
-                    user_id=(media_file_turn or {}).get("subject", ""))
+                    user_id=(domain_action_turn or media_file_turn or {}).get("subject", ""))
                 agent = None
                 media_file_token = None
+                domain_action_token = None
                 from agent.notification_presentation import notification_turn
                 from gateway.warning_notifications import diagnostic_turn_muted
                 muted = diagnostic_turn_muted({"notification_category": notification_category}, "api_server")
                 try:
                     from agent.media_file_context import bind as bind_media_file_turn
                     media_file_token = bind_media_file_turn(media_file_turn)
+                    from agent.domain_action_context import bind as bind_domain_action_turn
+                    domain_action_token = bind_domain_action_turn(domain_action_turn)
                     agent = self._create_agent(
                         ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
                         stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
@@ -4271,6 +4307,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         requested_provider=requested_provider, model_options=model_options, route=route,
                         session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
                         precision_availability_eligible=(not conversation_history and not resume_unanswered_turn),
+                        # Local-only selection may carry completed history into a NEW
+                        # turn. An unanswered/tool-owning tail is not a new turn.
+                        precision_elastic_eligible=(not resume_unanswered_turn and
+                            (not conversation_history or
+                             (conversation_history[-1].get('role') == 'assistant' and
+                              not conversation_history[-1].get('tool_calls')))),
                         precision_availability_profile=request_profile)
                     if agent_ref is not None:
                         agent_ref[0] = agent
@@ -4356,6 +4398,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         exc._notification_presentation_suppressed = True
                     raise
                 finally:
+                    if domain_action_token is not None:
+                        from agent.domain_action_context import reset as reset_domain_action_turn
+                        reset_domain_action_turn(domain_action_token)
                     if media_file_token is not None:
                         from agent.media_file_context import reset as reset_media_file_turn
                         reset_media_file_turn(media_file_token)

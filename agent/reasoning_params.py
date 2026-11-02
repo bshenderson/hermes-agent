@@ -7,7 +7,7 @@ Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO
 import time
 
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
-from agent.message_sanitization import matches_reasoning_echo_family
+from agent.message_sanitization import matches_reasoning_echo_family, needs_reasoning_echo
 from utils import base_url_host_matches
 
 # Static OpenRouter fallback when the live /v1/models capability cache is cold.
@@ -169,6 +169,7 @@ class ReasoningParamsMixin:
             return cached[1]
         result = (self._needs_deepseek_tool_reasoning() or self._needs_kimi_tool_reasoning()
                   or self._needs_mimo_tool_reasoning() or self._needs_ollama_tool_reasoning()
+                  or needs_reasoning_echo(self.provider, self.model, self.base_url)
                   or self._reasoning_echo_opt_in())
         self._thinking_pad_cache = (key, result)
         return result

@@ -3714,7 +3714,7 @@ def _commit_compaction(
     def source_refusal(candidate):
         from agent.compression_preservation import reject_installation
         original = messages_before_compression if messages_before_compression is not None else messages
-        if not reject_installation(agent, original, candidate, attempt):
+        if not reject_installation(agent, original, candidate, attempt, in_place=in_place):
             return None
         _emit_compression_attempt_telemetry(
             agent, started_at=attempt.started_at, commit_status="aborted", split_status="aborted",

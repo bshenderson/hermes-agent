@@ -835,6 +835,8 @@ class SessionMessagesMixin:
         """
         from hermes_state_errors import CompressionSessionClosedError
         def _do(conn):
+            from hermes_state_protected_events import refuse_history_mutation
+            refuse_history_mutation(conn, session_id)
             if reject_active_turn_lease:
                 self._check_transcript_write_guards(
                     conn, session_id, None, reject_active_turn_lease=True, reject_active_compression_lock=True)
@@ -1650,7 +1652,8 @@ class SessionMessagesMixin:
                 logger.info("Repaired %d message-alternation violation(s) while "
                     "restoring session %s — durable transcript kept them, "
                     "see repair_message_sequence", repaired, session_id)
-        return messages
+        from hermes_state_protected_events import restore_stream
+        return restore_stream(self, session_id, messages)
 
     def get_resume_conversations(self, session_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """``(model_history, display_history)`` for a resume from ONE SELECT; byte-identical to the separate
@@ -1842,6 +1845,8 @@ class SessionMessagesMixin:
         in-txn before any mutation (presentation-only metadata changes don't invalidate a rewind). A live turn
         lease refuses; expired/dead holders are reclaimed. ``rewind_count`` always increments."""
         def _do(conn):
+            from hermes_state_protected_events import refuse_history_mutation
+            refuse_history_mutation(conn, session_id)
             self._check_transcript_write_guards(
                 conn, session_id, None, reject_active_turn_lease=True, reject_active_compression_lock=True)
             if expected_active_ids is not None:
@@ -1952,6 +1957,8 @@ class SessionMessagesMixin:
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
+            from hermes_state_protected_events import refuse_history_mutation
+            refuse_history_mutation(conn, session_id)
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute(_RESET_COUNTERS_SQL, (session_id,))
         self._execute_write(_do)
