@@ -673,6 +673,14 @@ def matches_reasoning_echo_family(family: str, provider: Any, model: Any, base_u
 def reasoning_echo_family(provider: Any, model: Any, base_url: Any) -> str | None:
     """``"kimi"`` / ``"deepseek"`` / ``"mimo"`` / ``"ollama"`` (first match in table order) when the
     endpoint enforces reasoning_content echo-back, else ``None`` (strip side)."""
+    # The owned GPT-OSS vLLM Harmony route consumes current-turn analysis on
+    # tool continuation. Do not infer this capability from a cloud model name:
+    # strict OpenAI-compatible aggregators can reject reasoning_content.
+    if (provider in {'custom', 'custom:llamacpp-main'}
+            and model == 'gptoss-120b-openai-mxfp4-tp1-128k'
+            and isinstance(base_url, str)
+            and base_url.rstrip('/') == 'http://127.0.0.1:8090/v1'):
+        return 'gptoss-harmony-local'
     families = (rule[0] for rule in _REASONING_ECHO_RULES)
     return next((f for f in families if matches_reasoning_echo_family(f, provider, model, base_url)), None)
 
