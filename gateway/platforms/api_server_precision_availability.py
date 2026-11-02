@@ -15,6 +15,7 @@ MODELS = frozenset({'operator-default', 'precision-default'})
 CLOUD_PROVIDER = 'openai-codex'
 CLOUD_MODEL = 'gpt-6.1-sol'
 ELASTIC_MODEL = 'gemma4-31b-nvfp4-64k'
+GPTOSS_MODEL = 'gptoss-120b-openai-mxfp4-tp1-128k'
 
 
 class AvailabilityRefused(RuntimeError):
@@ -23,7 +24,7 @@ class AvailabilityRefused(RuntimeError):
 
 def probe_local(base_url, model):
     """Read a fixed loopback origin only: no bearer, redirect or prompt transport."""
-    if str(base_url).rstrip('/') != 'http://127.0.0.1:8090/v1' or model not in MODELS | {ELASTIC_MODEL}:
+    if str(base_url).rstrip('/') != 'http://127.0.0.1:8090/v1' or model not in MODELS | {ELASTIC_MODEL, GPTOSS_MODEL}:
         raise ValueError('unsupported admission destination')
     def unique(pairs):
         out = {}
@@ -58,7 +59,10 @@ def select_elastic_runtime(*, enabled, profile, model, explicit_selection, inten
         return None
     if intent not in {'responsive', 'substantial'}:
         raise AvailabilityRefused('Precision producer intent must be responsive or substantial. No model or tools dispatched.')
-    candidates = (ELASTIC_MODEL, 'precision-default') if intent == 'responsive' else ('precision-default',)
+    # These are independent resident admission resources, not retry destinations.
+    # Substantial producers keep their direct-resident policy; no cold loading.
+    resident = ('precision-default', GPTOSS_MODEL)
+    candidates = (ELASTIC_MODEL, *resident) if intent == 'responsive' else resident
     for candidate in candidates:
         try:
             observed = probe(candidate)
@@ -68,7 +72,7 @@ def select_elastic_runtime(*, enabled, profile, model, explicit_selection, inten
             return {'model': candidate, 'runtime': None, 'local_no_wait': True,
                     'warm_only': candidate == ELASTIC_MODEL,
                     'notice': f'Precision route: {candidate} ({intent}); selected before execution. Later contention refuses without route replay.'}
-    raise AvailabilityRefused('Precision service unavailable; Gemma/Sparky not ready. No model or tools dispatched.')
+    raise AvailabilityRefused('Precision service unavailable; Gemma/Qwen/GPT-OSS not ready. No model or tools dispatched.')
 
 
 def select_runtime(*, enabled, profile, model, explicit_selection, probe, resolve):
