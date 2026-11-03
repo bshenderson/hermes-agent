@@ -110,6 +110,19 @@ def validate_citations(db, *, session_id, profile, checkpoint, citations):
         if framed_events != events[:len(framed_events)]:
             raise ValueError('citation checkpoint event journal mismatch')
         for index, record in enumerate(records):
+            from agent.tool_source_custody import is_reference, resolve_reference
+            if is_reference(record):
+                # Retain the owner/profile snapshot gate above. The reference is
+                # a durable tool origin, never authenticated operator issuance.
+                try:
+                    archived = resolve_reference(db, session_id, record)
+                except Exception as error:
+                    raise ValueError('citation tool archive unavailable or changed') from error
+                for original in archived:
+                    if len(canonical) >= MAX_MATCHES:
+                        raise ValueError('citation match budget exceeded')
+                    canonical.append((row, index, _redact_compaction_text(original['content']), [original]))
+                continue
             origins = [original for original in originals
                        if record in _redact_compaction_text(original['content'])]
             if not record or not origins:

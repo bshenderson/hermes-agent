@@ -68,6 +68,9 @@ def collect_records(compressor, messages, output_tokens):
     """Harvest the unpruned canonical transcript, never prior model prose."""
     from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
     from agent.protected_events import collect_events, SourceRecords
+    from agent.auxiliary_client import _get_auxiliary_task_config
+    from agent.tool_source_custody import archive_current_tools, is_reference, validate_references
+    archive_tools = _get_auxiliary_task_config('compression').get('archive_tool_sources') is True
     events = collect_events(compressor, messages)
     records = []
     for message in messages:
@@ -85,6 +88,10 @@ def collect_records(compressor, messages, output_tokens):
             fresh = compressor._strip_context_summary_handoff_message(message)
         if fresh is None:
             continue
+        if archive_tools and fresh.get('role') == 'tool':
+            # Exact originals remain in the owner-scoped durable archive. User and
+            # assistant commitments retain their existing inline guarantees.
+            continue
         serialized = compressor._serialize_records_for_summary([fresh], lossless=True)
         if not serialized:
             continue
@@ -97,6 +104,10 @@ def collect_records(compressor, messages, output_tokens):
                        or _CONSTRAINT.search(line) or _PROVENANCE.search(line)
                        or _UNCERTAIN.search(line)
                        or (_MODAL.search(line) and _DATE.search(line)))
+    validate_references(compressor, records)
+    if archive_tools:
+        references = archive_current_tools(compressor, messages, records)
+        records = [record for record in records if not is_reference(record)] + references
     records = SourceRecords(dict.fromkeys(records), events)
     if len(encode_records(records).encode('utf-8')) > min(8192, output_tokens // 2):
         raise CompressionBudgetError('source commitments exceed preservation budget')
@@ -266,6 +277,9 @@ def reject_installation(agent, original, candidate, attempt, *, in_place=True):
             raise CompressionBudgetError('session-local protected events prohibit implicit session rotation')
         budget = lossless_settings()
         if budget:
+            from agent.tool_source_custody import is_reference
+            if not in_place and any(is_reference(record) for record in collect_records(compressor, original, budget['output_tokens'])):
+                raise CompressionBudgetError('session-local tool archive prohibits implicit session rotation')
             validate_checkpoint(compressor, original, candidate, budget['output_tokens'])
     except CompressionBudgetError as error:
         attempt.restore_compressor(compressor)

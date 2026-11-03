@@ -2118,7 +2118,14 @@ def check_compression_model_feasibility(agent: Any) -> None:
                 f"auxiliary.compression.context_length to override the "
                 f"detected value if it is wrong."
             )
-        if aux_context < agent.context_compressor.threshold_tokens:
+        from agent.compression_budget import lossless_settings
+        from agent.context_compressor import ContextCompressor
+        # The governed complete-input engine maps arbitrary origin windows into
+        # bounded requests; its per-request context is not the origin trigger.
+        chunk_budget = lossless_settings()
+        chunked = (isinstance(agent.context_compressor, ContextCompressor)
+                   and chunk_budget is not None and chunk_budget['context_length'] == aux_context)
+        if aux_context < agent.context_compressor.threshold_tokens and not chunked:
             _lower_threshold_to_aux_context(
                 agent, aux_model=aux_model, aux_context=aux_context, aux_provider=_aux_cfg_provider,
                 aux_base_url=aux_base_url,
