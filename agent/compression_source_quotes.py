@@ -14,18 +14,29 @@ FORMAT = {'type': 'json_schema', 'json_schema': {'name': 'source_excerpts', 'str
 
 def configured_summary(compressor, turns, source, budget, started, records):
     from agent.auxiliary_client import _get_auxiliary_task_config
+    from agent.selected_source_custody import enabled, extend_records
+    selected_custody = enabled()
     strategy = _get_auxiliary_task_config('compression').get('summary_strategy', 'narrative')
+    if selected_custody and strategy != 'source_quotes_custody':
+        raise CompressionBudgetError('selected source custody requires source_quotes_custody strategy')
     if strategy == 'narrative':
         return None
     if strategy not in {'source_quotes', 'source_quotes_custody'}:
         raise CompressionBudgetError('unsupported compression summary strategy')
     from agent.compression_preservation import collect_records
+    if selected_custody and records is None:
+        raise CompressionBudgetError('selected source custody requires a full custody checkpoint')
+    if selected_custody:
+        from agent.selected_source_custody import preflight
+        preflight(compressor)
     required = collect_records(compressor, turns, budget['output_tokens']) if records is None else records
     source = _canonical_source(compressor, turns, required)
     findings = {}
     result = extract_summary(source, lambda prompt: compressor._call_summary_llm(
         prompt, started, response_format=FORMAT), required=required,
         custody=strategy == 'source_quotes_custody', findings=findings, **budget)
+    if selected_custody:
+        extend_records(compressor, required, findings['selected_source_quotes'], budget['output_tokens'])
     compressor._last_source_quote_findings = findings
     if not compressor._transcript_has_real_user_turn(turns):
         from agent.context_compressor import HISTORICAL_TASK_HEADING, _NO_USER_TASK_SENTINEL
@@ -35,6 +46,8 @@ def configured_summary(compressor, turns, source, budget, started, records):
 
 def _canonical_source(compressor, turns, required):
     from agent.compression_preservation import decode_records
+    from agent.selected_source_custody import is_reference, validate_records
+    validate_records(compressor, required)
     from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
     parts = []
     for message in turns:
@@ -43,14 +56,15 @@ def _canonical_source(compressor, turns, required):
             if not message.get(COMPRESSED_SUMMARY_METADATA_KEY):
                 raise CompressionBudgetError('untyped handoff cannot establish quotation source')
             historical = decode_records(_handoff_only_content(message.get('content')))
-            parts.append('[HISTORICAL SOURCE COMMITMENTS]:\n' + '\n'.join(historical))
+            validate_records(compressor, historical)
+            parts.append('[HISTORICAL SOURCE COMMITMENTS]:\n' + '\n'.join(record for record in historical if not is_reference(record)))
             fresh = compressor._strip_context_summary_handoff_message(message)
         if fresh is not None:
             parts.extend(compressor._serialize_records_for_summary([fresh], lossless=True))
     source = '\n\n'.join(parts)
     # Canonical records can precede tool pruning/head-tail selection. Supply their
     # source bytes without treating old model-authored presentation as source.
-    outside = [record for record in required if record not in source]
+    outside = [record for record in required if not is_reference(record) and record not in source]
     if outside:
         source += '\n\n[CANONICAL SOURCE COMMITMENTS OUTSIDE SELECTED WINDOW]:\n' + '\n'.join(outside)
     return source
@@ -129,6 +143,8 @@ def extract_summary(source, call, *, context_length, output_tokens, safety_token
         quotes.extend(_selection(chunk, call(prompt)))
     if any(source.count(quote) != 1 for quote in quotes):
         raise CompressionBudgetError('ambiguous source excerpt across chunks')
+    if findings is not None:
+        findings['selected_source_quotes'] = list(dict.fromkeys(quotes))
     quotes = _merge_quotes(source, quotes)
     # Required records come from canonical custody, not model-written historical prose.
     missing = [record for record in required if record in source and not any(record in quote for quote in quotes)]

@@ -105,6 +105,8 @@ def collect_records(compressor, messages, output_tokens):
                        or _UNCERTAIN.search(line)
                        or (_MODAL.search(line) and _DATE.search(line)))
     validate_references(compressor, records)
+    from agent.selected_source_custody import validate_records
+    validate_records(compressor, records)
     if archive_tools:
         references = archive_current_tools(compressor, messages, records)
         records = [record for record in records if not is_reference(record)] + references
@@ -250,8 +252,10 @@ def validate_checkpoint(compressor, original, candidate, output_tokens):
         actual.extend(decoded)
         handoff_bytes += len(text.encode('utf-8'))
         carriers += 1
-    if not carriers or set(actual) != set(expected):
+    if not carriers:
         raise CompressionBudgetError('final checkpoint source records differ from canonical history')
+    from agent.selected_source_custody import validate_augmentation
+    validate_augmentation(compressor, original, expected, actual, output_tokens)
     if handoff_bytes > output_tokens:
         raise CompressionBudgetError('final checkpoint exceeds output byte budget')
 
