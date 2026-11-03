@@ -46,7 +46,8 @@ def _prompt(rows):
 def _format(rows):
     ids = [row['id'] for row in rows]
     return {'type':'json_schema','json_schema':{'name':'source_record_decisions','strict':True,
-        'schema':{'type':'object','properties':{key:{'type':'boolean'} for key in ids},
+        'schema':{'type':'object','properties':{row['id']:({'type':'boolean','const':False}
+                  if not row['text'].strip() else {'type':'boolean'}) for row in rows},
                   'required':ids,'additionalProperties':False}}}
 
 
@@ -70,6 +71,8 @@ def decisions(rows,response):
         raise CompressionBudgetError('incomplete or foreign record decisions')
     if any(type(item) is not bool for item in value.values()):
         raise CompressionBudgetError('nonboolean record decision')
+    if any(not row['text'].strip() and value[row['id']] is not False for row in rows):
+        raise CompressionBudgetError('fixed structural record must be false')
     return value
 
 
