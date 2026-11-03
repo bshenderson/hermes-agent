@@ -25,7 +25,8 @@ def configured_summary(compressor, turns, source, budget, started, records):
     findings = {}
     result = extract_summary(source, lambda prompt: compressor._call_summary_llm(
         prompt, started, response_format=FORMAT), required=required,
-        custody=strategy == 'source_quotes_custody', findings=findings, **budget)
+        custody=strategy == 'source_quotes_custody', findings=findings,
+        source_chunk_bytes=_get_auxiliary_task_config('compression').get('source_chunk_bytes'), **budget)
     compressor._last_source_quote_findings = findings
     if not compressor._transcript_has_real_user_turn(turns):
         from agent.context_compressor import HISTORICAL_TASK_HEADING, _NO_USER_TASK_SENTINEL
@@ -115,11 +116,15 @@ def _merge_quotes(source, quotes):
     return [source[start:end] for start, end in merged]
 
 
-def extract_summary(source, call, *, context_length, output_tokens, safety_tokens=1024, required=(), custody=False, findings=None):
+def extract_summary(source, call, *, context_length, output_tokens, safety_tokens=1024, required=(), custody=False, findings=None, source_chunk_bytes=None):
     """Select, validate and order exact quotations; refuse omitted custody records."""
     available = context_length - output_tokens - safety_tokens - len(_prompt('').encode('utf-8'))
     if available < 256:
         raise CompressionBudgetError('source quotation instructions exceed input budget')
+    if source_chunk_bytes is not None:
+        if type(source_chunk_bytes) is not int or source_chunk_bytes < 256:
+            raise CompressionBudgetError('invalid source chunk byte cap')
+        available = min(available, source_chunk_bytes)
     quotes = []
     for chunk in _chunks(source, available):
         prompt = _prompt(chunk)
