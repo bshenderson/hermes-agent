@@ -144,7 +144,7 @@ def extract_summary(source, call, *, context_length, output_tokens, safety_token
     if any(source.count(quote) != 1 for quote in quotes):
         raise CompressionBudgetError('ambiguous source excerpt across chunks')
     if findings is not None:
-        findings['selected_source_quotes'] = list(dict.fromkeys(quotes))
+        findings['selected_source_quotes'] = sorted(dict.fromkeys(quotes), key=lambda quote: (source.index(quote), len(quote)))
     quotes = _merge_quotes(source, quotes)
     # Required records come from canonical custody, not model-written historical prose.
     missing = [record for record in required if record in source and not any(record in quote for quote in quotes)]

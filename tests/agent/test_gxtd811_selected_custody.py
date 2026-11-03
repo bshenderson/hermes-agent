@@ -215,6 +215,15 @@ def test_selected_quote_budget_includes_existing_protected_event_bytes(owned):
         validate_augmentation(make(db),[{'role':'user','content':ID_RECORD}],records,[reference,ID_RECORD],24576)
 
 
+def test_carried_selection_order_follows_source_not_model_array():
+    from agent.compression_source_quotes import extract_summary
+    findings = {}
+    source = ID_RECORD+'\n'+DONE_RECORD
+    extract_summary(source,lambda prompt:json.dumps({'excerpts':[DONE_RECORD,ID_RECORD]}),
+                    context_length=131072,output_tokens=24576,custody=True,findings=findings)
+    assert findings['selected_source_quotes'] == [ID_RECORD,DONE_RECORD]
+
+
 @pytest.fixture
 def owned(tmp_path, monkeypatch):
     from agent import auxiliary_client as aux
