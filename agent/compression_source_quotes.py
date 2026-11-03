@@ -17,11 +17,13 @@ def configured_summary(compressor, turns, source, budget, started, records):
     from agent.selected_source_custody import enabled, extend_records
     selected_custody = enabled()
     strategy = _get_auxiliary_task_config('compression').get('summary_strategy', 'narrative')
-    if selected_custody and strategy != 'source_quotes_custody':
-        raise CompressionBudgetError('selected source custody requires source_quotes_custody strategy')
+    if selected_custody and strategy not in {'source_quotes_custody', 'source_records_custody'}:
+        raise CompressionBudgetError('selected source custody requires a supported custody strategy')
+    if strategy == 'source_records_custody' and not selected_custody:
+        raise CompressionBudgetError('record decisions require selected source custody')
     if strategy == 'narrative':
         return None
-    if strategy not in {'source_quotes', 'source_quotes_custody'}:
+    if strategy not in {'source_quotes', 'source_quotes_custody', 'source_records_custody'}:
         raise CompressionBudgetError('unsupported compression summary strategy')
     from agent.compression_preservation import collect_records
     if selected_custody and records is None:
@@ -32,9 +34,14 @@ def configured_summary(compressor, turns, source, budget, started, records):
     required = collect_records(compressor, turns, budget['output_tokens']) if records is None else records
     source = _canonical_source(compressor, turns, required)
     findings = {}
-    result = extract_summary(source, lambda prompt: compressor._call_summary_llm(
-        prompt, started, response_format=FORMAT), required=required,
-        custody=strategy == 'source_quotes_custody', findings=findings, **budget)
+    if strategy == 'source_records_custody':
+        from agent.compression_record_selector import select_records
+        result = select_records(source, lambda prompt, response_format: compressor._call_summary_llm(
+            prompt, started, response_format=response_format), required=required, findings=findings, **budget)
+    else:
+        result = extract_summary(source, lambda prompt: compressor._call_summary_llm(
+            prompt, started, response_format=FORMAT), required=required,
+            custody=strategy == 'source_quotes_custody', findings=findings, **budget)
     if selected_custody:
         extend_records(compressor, required, findings['selected_source_quotes'], budget['output_tokens'])
     compressor._last_source_quote_findings = findings

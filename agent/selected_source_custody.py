@@ -96,7 +96,7 @@ def _quote(quote):
         _fail('quotation is not sanitized')
 
 
-def bind_quotes(compressor, quotes):
+def bind_quotes(compressor, quotes, *, _project_serializer_role=True):
     quotes = list(dict.fromkeys(quotes))
     if len(quotes)>MAX_QUOTES:
         _fail('quotation count exceeded')
@@ -117,6 +117,16 @@ def bind_quotes(compressor, quotes):
                 start = text.find(raw,start+1)
         if not origins:
             _fail('quotation has no original text source')
+        from agent.auxiliary_client import _get_auxiliary_task_config
+        record_mode = _get_auxiliary_task_config('compression').get('summary_strategy') == 'source_records_custody'
+        if record_mode and _project_serializer_role:
+            prefixes = {f"[{origin['role'].upper()}]: " for origin in origins}
+            if len(prefixes) == 1:
+                prefix = next(iter(prefixes))
+                if quote.startswith(prefix) and all(origin['start'] == 0 for origin in origins):
+                    # Remove one proven serializer prefix, never an authored inner prefix.
+                    references.extend(bind_quotes(compressor, [quote[len(prefix):]], _project_serializer_role=False))
+                    continue
         value = {'session_id':sid, 'profile':profile, 'quote':quote, 'origins':origins}
         reference = PREFIX+_json(value)
         if len(reference.encode('utf-8'))>8192:
@@ -216,7 +226,10 @@ def validate_augmentation(compressor, original, expected, actual, output_tokens)
     for reference in actual:
         if is_reference(reference) and reference not in expected:
             quote = resolve_reference(compressor,reference)
-            if source.count(quote)!=1:
+            from agent.auxiliary_client import _get_auxiliary_task_config
+            record_mode = _get_auxiliary_task_config('compression').get('summary_strategy') == 'source_records_custody'
+            occurrences = source.count(quote)
+            if occurrences == 0 or (not record_mode and occurrences != 1):
                 _fail('new quotation lacks unique current source')
             allowed.update((reference,quote))
     if not extra.issubset(allowed):
