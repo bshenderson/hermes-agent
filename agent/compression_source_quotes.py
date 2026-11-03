@@ -64,7 +64,10 @@ def _prompt(source):
         'and the superseded assignment, literal identifiers, file paths, commands, observed results, errors, '
         'authorization boundaries, unknown outcomes and unresolved work. Preserve explicit negations. '
         'Copy complete relevant sentences verbatim; do not paraphrase, infer execution, invent tools or '
-        'summarize this instruction. Skip repetitive filler and routine status rows without durable facts. '
+        'summarize this instruction. Evaluate each source line separately: skip a repetitive filler or routine '
+        'status line only when that line has no durable facts. Repetition elsewhere must not suppress an '
+        'owner, action, deadline, restriction, negation or unknown outcome in another line. '
+        'A mixed segment still requires quotations of its durable facts. '
         'If this segment contains no durable information return {"excerpts":[]}.\n'
         '<source>\n' + source + '\n</source>\nReturn the JSON selection now.'
     )
