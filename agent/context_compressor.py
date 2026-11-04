@@ -4038,7 +4038,14 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
         try:
             budget = lossless_settings()
+            from agent.compression_budget import best_effort_mode
+            from agent.compression_preservation import STATE_PROMPT_GUIDANCE
+            best_effort = best_effort_mode()
             build = lambda text: self._build_summary_prompt(text, summary_budget, focus_topic, memory_context, has_user_turn)
+            if best_effort:
+                # Append last so the guidance takes precedence, matching focus handling.
+                _base_build = build
+                build = lambda text: _base_build(text) + '\n' + STATE_PROMPT_GUIDANCE
             if budget:
                 serialized = self._serialize_for_summary(turns_to_summarize, lossless=True)
 
@@ -5637,16 +5644,38 @@ Write only the summary body. Do not include any preamble or prefix."""
         # assembled and measured from the pruned copy (#61932).
         canonical_messages = self._drop_blank_echoes(messages)
         from agent.compression_preservation import (
-            collect_records, frame_summary, validate_checkpoint, refuse_replacement,
+            collect_records, frame_best_effort, frame_summary,
+            refuse_replacement, validate_checkpoint,
         )
+        from agent.compression_budget import best_effort_mode
         preservation_previous_summary = self._previous_summary
+        self._operational_state_max_bytes = None
         try:
+            best_effort = best_effort_mode()
             preservation_budget = lossless_settings()
-            from agent.protected_events import collect_events
-            if not preservation_budget and collect_events(self, canonical_messages):
-                raise CompressionBudgetError('protected events require lossless checkpoint custody')
-            source_records = (collect_records(self, canonical_messages, preservation_budget['output_tokens'])
-                              if preservation_budget else None)
+            if best_effort:
+                if not preservation_budget:
+                    raise CompressionBudgetError(
+                        'best_effort compression requires a governed lossless compression route')
+                self._operational_state_max_bytes = preservation_budget['output_tokens'] // 2
+        except CompressionBudgetError as error:
+            self._operational_state_max_bytes = None
+            refuse_replacement(self, preservation_previous_summary, error)
+            return canonical_messages
+        try:
+            if best_effort:
+                # Explicit best-effort mode: complete-input bounded summarization stays;
+                # the lexical mandatory ledger is replaced by required Operational State
+                # presentation. Trusted protected-event journal custody remains mandatory.
+                from agent.compression_preservation import collect_state_records
+                source_records = collect_state_records(self, canonical_messages)
+            elif not preservation_budget:
+                from agent.protected_events import collect_events
+                if collect_events(self, canonical_messages):
+                    raise CompressionBudgetError('protected events require lossless checkpoint custody')
+                source_records = None
+            else:
+                source_records = collect_records(self, canonical_messages, preservation_budget['output_tokens'])
         except CompressionBudgetError as error:
             refuse_replacement(self, preservation_previous_summary, error)
             return canonical_messages
@@ -5720,7 +5749,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Phase 4: Assemble compressed message list
         if preservation_budget:
             try:
-                summary = frame_summary(self, summary, source_records, preservation_budget['output_tokens'])
+                summary = (frame_best_effort(self, summary, source_records, preservation_budget['output_tokens'])
+                           if best_effort else
+                           frame_summary(self, summary, source_records, preservation_budget['output_tokens']))
             except CompressionBudgetError as error:
                 refuse_replacement(self, preservation_previous_summary, error)
                 return canonical_messages
