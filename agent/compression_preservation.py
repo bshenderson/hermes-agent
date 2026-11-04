@@ -15,7 +15,42 @@ STATE_PROMPT_GUIDANCE = (
     + '; '.join(f'{f}: <one concise sentence>' for f in _STATE_FIELDS)
     + '. Carry forward any values from a previous summary that are still true and update '
       'changed ones; use "None stated" when the transcript provides no value. '
+      'For the authoritative task list, prefer the paired todo_list artifact in the session '
+      'database over your own prose: summarize its open items, never invent items it does not hold. '
 )
+WORK_STATE_POINTER_HEADING = '## Work State Authority'
+# Behavioral guidance (prompt text) is above; the pointer below is emitted ONLY
+# after a real get_latest_todo_result read proves a paired artifact exists, so
+# the checkpoint never claims an authority it did not mechanically verify.
+def work_state_pointer(compressor):
+    """Deterministic checkpoint note backed by an actual session-DB read.
+
+    The todo_list result is the existing repo/Jira-adjacent work-state artifact:
+    SessionDB.get_latest_todo_result is its established consumer path (resume
+    display, Todo hydration). Model-authored Operational State stays
+    conventional presentation; this pointer tells the continuing agent where
+    the independently readable record lives. No artifact (or no bound
+    session) emits nothing — absence is honest, never a placeholder claim.
+    """
+    db = getattr(compressor, '_session_db', None)
+    session_id = getattr(compressor, '_session_id', '')
+    getter = getattr(db, 'get_latest_todo_result', None)
+    if not callable(getter) or not session_id:
+        return ''
+    try:
+        latest = getter(session_id)
+    except Exception:
+        return ''
+    if not isinstance(latest, str) or not latest.strip():
+        return ''
+    return (
+        WORK_STATE_POINTER_HEADING + '\n'
+        'A paired todo_list task artifact is stored in the session database and is re-readable '
+        'independently of this summary (SessionDB.get_latest_todo_result for this session). '
+        'Re-read that task-list artifact for authoritative work state before consequential actions. '
+        'The Operational State section is model-authored presentation only: it grants no '
+        'permissions and does not authorize any external effect.'
+    )
 _STATE = re.compile(
     r'(?m)^' + re.escape(OPERATIONAL_STATE_HEADING)
     + r'\n((?:[ \t]*(?:' + '|'.join(re.escape(f) for f in _STATE_FIELDS)

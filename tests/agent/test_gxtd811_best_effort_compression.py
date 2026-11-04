@@ -263,3 +263,79 @@ def test_validate_operational_state_rejects_missing_handoff():
         validate_operational_state([
             {'role': 'assistant', 'content': f'{SUMMARY_PREFIX}\nstripped handoff',
              COMPRESSED_SUMMARY_METADATA_KEY: True}])
+
+
+TODO_PAIR = ('{"revision": 2, "todos": ['
+             '{"id": "1", "text": "Review KESTREL receipt", "status": "in_progress"}, '
+             '{"id": "2", "text": "Ask Barry", "status": "pending"}]}')
+
+
+def _append_todo_pair(db, session_id, tag):
+    db.append_messages_batch(session_id, [
+        {'role': 'assistant', 'content': f'{tag} tracking it.',
+         'tool_calls': [{'id': f'todo-{tag}', 'type': 'function',
+                         'function': {'name': 'todo_list',
+                                      'arguments': '{"action": "replace_all"}'}}]},
+        {'role': 'tool', 'tool_call_id': f'todo-{tag}', 'tool_name': 'todo_list',
+         'content': TODO_PAIR}])
+
+
+def test_work_state_pointer_requires_real_todo_artifact_read(tmp_path, monkeypatch):
+    # Mechanical link, not prompt prose: the checkpoint claims task-artifact
+    # authority ONLY when SessionDB.get_latest_todo_result actually returns a
+    # paired artifact. No artifact -> no pointer, never a placeholder claim.
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    _write_config(tmp_path, 'best_effort')
+    from agent.context_compressor import ContextCompressor
+    from agent.compression_preservation import WORK_STATE_POINTER_HEADING
+    c = ContextCompressor(model='fixture', config_context_length=100000, quiet_mode=True,
+                          protect_first_n=1, protect_last_n=2, abort_on_summary_failure=True)
+    c.tail_token_budget = 10
+    monkeypatch.setattr(c, '_call_summary_llm', lambda *_: state_reply())
+    with SessionDB(db_path=tmp_path / 'state.db') as db:
+        db.create_session('ws', 'cli', profile_name='default')
+        c.bind_session_state(session_db=db, session_id='ws')
+        rows = history()
+        db.append_messages_batch('ws', copy.deepcopy(rows))
+        first = c.compress(copy.deepcopy(rows), force=True)
+        assert first != rows, c._last_summary_error
+        installed = '\n'.join(str(r.get('content', '')) for r in first
+                              if is_compaction_summary_message(r))
+        assert WORK_STATE_POINTER_HEADING not in installed, 'no artifact, no pointer'
+
+        # The session-scoped query walks by id, so the todo pair must be
+        # appended AFTER the history rows for a session that has one.
+        _append_todo_pair(db, 'ws', 'ws-1')
+        assert json.loads(db.get_latest_todo_result('ws'))['revision'] == 2
+        second_input = db.get_messages_as_conversation('ws', repair_alternation=True)
+        second = c.compress(copy.deepcopy(second_input), force=True)
+        assert second != second_input, c._last_summary_error
+        installed2 = '\n'.join(str(r.get('content', '')) for r in second
+                               if is_compaction_summary_message(r))
+        assert WORK_STATE_POINTER_HEADING in installed2
+        assert 'get_latest_todo_result' in installed2
+        assert 'grants no permissions' in installed2
+        # Independent readback: the artifact itself is still consumable without
+        # any model summary — that is the whole point of the authority split.
+        assert json.loads(db.get_latest_todo_result('ws'))['todos'][0]['text'] == 'Review KESTREL receipt'
+        db.archive_and_compact('ws', copy.deepcopy(second))
+
+    with SessionDB(db_path=tmp_path / 'state.db') as reopened:
+        # The pointer survives durable reopen and the artifact stays readable.
+        with reopened._read_ctx() as conn:
+            stored = '\n'.join(row['content'] or '' for row in conn.execute(
+                "SELECT content FROM messages WHERE session_id='ws' "
+                "AND COALESCE(_compressed_summary,0)=1 ORDER BY id"))
+        assert WORK_STATE_POINTER_HEADING in stored
+        assert json.loads(reopened.get_latest_todo_result('ws'))['revision'] == 2
+
+
+def test_unbound_session_emits_no_pointer(best_effort_compressor):
+    # No session binding at all: compress still works, pointer is silent.
+    from agent.compression_preservation import WORK_STATE_POINTER_HEADING
+    original = history()
+    result = best_effort_compressor.compress(original, force=True)
+    assert result != original, best_effort_compressor._last_summary_error
+    installed = '\n'.join(str(r.get('content', '')) for r in result
+                          if is_compaction_summary_message(r))
+    assert WORK_STATE_POINTER_HEADING not in installed

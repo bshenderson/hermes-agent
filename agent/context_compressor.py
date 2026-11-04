@@ -5754,6 +5754,12 @@ Write only the summary body. Do not include any preamble or prefix."""
             except CompressionBudgetError as error:
                 refuse_replacement(self, preservation_previous_summary, error)
                 return canonical_messages
+            # Mechanical link, not prompt prose: emit the work-state pointer only
+            # when a real session-DB read confirms a paired todo_list artifact.
+            from agent.compression_preservation import work_state_pointer
+            pointer = work_state_pointer(self)
+            if pointer:
+                summary = summary + '\n\n' + pointer
         if preservation_budget:
             try:
                 summary = (frame_best_effort(self, summary, source_records, preservation_budget['output_tokens'])
