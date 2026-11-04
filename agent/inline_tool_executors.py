@@ -122,6 +122,21 @@ def _callback_tool(module: str, func: str, callback_attr: str, *arg_specs: _ArgS
 
 def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
     session_db = agent._get_session_db_for_recall()
+    archive_binding = getattr(agent, '_compression_archive_recall', None)
+    if archive_binding is not None:
+        # Bound only by the owning archive consumer, never model arguments or
+        # summary text. Invalid bindings refuse; they do not fall back to broad search.
+        from agent.compression_archive import ArchiveRecall
+        try:
+            if not isinstance(archive_binding, tuple) or len(archive_binding) != 2:
+                raise ValueError('archive recall binding invalid')
+            adapter, reference = archive_binding
+            if (not isinstance(adapter, ArchiveRecall) or adapter._db is not session_db
+                    or adapter._session_id != agent.session_id):
+                raise ValueError('archive recall owner binding changed')
+            return adapter.invoke(reference, args)
+        except ValueError as error:
+            return json.dumps({'success': False, 'error': str(error)})
     if not session_db:
         from hermes_state import format_session_db_unavailable
 
