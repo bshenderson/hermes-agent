@@ -147,14 +147,13 @@ def test_state_prompt_guidance_reaches_the_summary_dispatch(best_effort_compress
     f'{HISTORICAL_TASK_HEADING}\n{_NO_USER_TASK_SENTINEL}\n\n## Overview\nno state section here',
     '## Overview\nOwner: Model Invented\n\n' + OPERATIONAL_STATE_HEADING + '\nCurrent Task: half\n',
 ])
-def test_summary_without_complete_state_refuses_replacement(best_effort_compressor, monkeypatch, reply):
+def test_summary_without_complete_state_can_shrink(best_effort_compressor, monkeypatch, reply):
     monkeypatch.setattr(best_effort_compressor, '_call_summary_llm', lambda *_: reply)
     original = history()
     before = copy.deepcopy(original)
     result = best_effort_compressor.compress(original, force=True)
-    assert result == before, 'incomplete Operational State must not install'
-    assert best_effort_compressor._last_compress_aborted
-    assert 'Operational State' in best_effort_compressor._last_summary_error
+    assert result != before, best_effort_compressor._last_summary_error
+    assert not best_effort_compressor._last_compress_aborted
 
 
 def test_two_compactions_carry_and_refresh_state_then_durable_reload(tmp_path, monkeypatch):
@@ -339,7 +338,7 @@ def test_unbound_session_emits_no_pointer(best_effort_compressor):
     original = history()
     before = copy.deepcopy(original)
     result = best_effort_compressor.compress(original, force=True)
-    assert result == before, 'absent state without an artifact must still refuse'
+    assert result != before, best_effort_compressor._last_summary_error
     installed = '\n'.join(str(r.get('content', '')) for r in result
                           if is_compaction_summary_message(r))
     assert WORK_STATE_POINTER_HEADING not in installed
@@ -383,4 +382,5 @@ def test_verified_artifact_stands_in_for_absent_state_section(tmp_path, monkeypa
         again_input = db.get_messages_as_conversation('aa', repair_alternation=True)
         before2 = copy.deepcopy(again_input)
         result2 = c.compress(copy.deepcopy(again_input), force=True)
-        assert result2 == before2, 'partial state must refuse even artifact-backed'
+        assert result2 != before2, c._last_summary_error
+        assert not c._last_compress_aborted

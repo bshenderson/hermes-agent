@@ -5644,8 +5644,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         # assembled and measured from the pruned copy (#61932).
         canonical_messages = self._drop_blank_echoes(messages)
         from agent.compression_preservation import (
-            collect_records, extract_state_block, frame_best_effort, frame_summary,
-            refuse_replacement, validate_checkpoint, validate_operational_state,
+            collect_records, frame_best_effort, frame_summary,
+            refuse_replacement, validate_checkpoint,
         )
         from agent.compression_budget import best_effort_mode
         preservation_previous_summary = self._previous_summary
@@ -5747,23 +5747,6 @@ Write only the summary body. Do not include any preamble or prefix."""
                 telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
             )
         # Phase 4: Assemble compressed message list
-        if best_effort:
-            # Mechanical link first, not prompt prose: the pointer is permitted
-            # only after a real session-DB read confirms a paired todo_list
-            # artifact. That verified artifact may then stand in for a
-            # completely-absent model-authored state section (partial never
-            # passes); without it, the four-field shape gate is strict.
-            from agent.compression_preservation import work_state_pointer
-            pointer = work_state_pointer(self)
-            try:
-                summary, _ = extract_state_block(
-                    summary, preservation_previous_summary, self._operational_state_max_bytes,
-                    allow_absent=bool(pointer))
-            except CompressionBudgetError as error:
-                refuse_replacement(self, preservation_previous_summary, error)
-                return canonical_messages
-            if pointer:
-                summary = summary + '\n\n' + pointer
         if preservation_budget:
             try:
                 summary = (frame_best_effort(self, summary, source_records, preservation_budget['output_tokens'])
@@ -5784,13 +5767,6 @@ Write only the summary body. Do not include any preamble or prefix."""
             self._previous_summary = self._strip_summary_prefix(summary)
             from agent.protected_events import carry_stream
             carry_stream(canonical_messages, result)
-        if best_effort:
-            try:
-                validate_operational_state(result)
-            except CompressionBudgetError as error:
-                self.compression_count -= 1
-                refuse_replacement(self, preservation_previous_summary, error)
-                return canonical_messages
         return result
 
     def _assemble_compressed(

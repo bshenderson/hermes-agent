@@ -391,9 +391,32 @@ def frame_best_effort(compressor, summary, records, output_tokens):
     if END in summary:
         raise CompressionBudgetError('unmatched model source block')
     summary = _redact_compaction_text(summary.replace(CONTRACT, '')).rstrip()
-    framed = summary + ('\n\n' + encode_events(records.events).lstrip('\n') if records.events else '')
-    result = compressor._with_summary_prefix(framed)
-    if len(result.encode('utf-8')) > output_tokens:
+    # Optional prose can be lossy; source-owned events and the store-derived
+    # task reference cannot. Never trust a model-emitted reference heading.
+    summary = re.sub(r'(?ms)^' + re.escape(WORK_STATE_POINTER_HEADING)
+                     + r'\n.*?(?=^## |\Z)', '', summary).strip()
+    pointer = work_state_pointer(compressor)
+    events = encode_events(records.events).lstrip('\n') if records.events else ''
+    mandatory = '\n\n'.join(part for part in (pointer, events) if part)
+    from agent.context_compressor import _SUMMARY_END_MARKER
+    # Assembly adds its end marker later; reserve those exact bytes now.
+    reserve = len(('\n\n' + _SUMMARY_END_MARKER).encode('utf-8'))
+    def render(prose):
+        return compressor._with_summary_prefix(
+            '\n\n'.join(part for part in (prose, mandatory) if part))
+    available = output_tokens - reserve - len(render('').encode('utf-8'))
+    if available < 0:
+        raise CompressionBudgetError('mandatory checkpoint exceeds output byte budget')
+    if mandatory:
+        available -= 2  # separator between optional prose and mandatory state
+    raw = summary.encode('utf-8')
+    if len(raw) > max(0, available):
+        notice = '\n[Optional summary excerpt; omitted narrative remains in session history.]'
+        limit = max(0, available - len(notice.encode('utf-8')))
+        summary = raw[:limit].decode('utf-8', errors='ignore').rstrip()
+        summary = summary + notice if available >= len(notice.encode('utf-8')) else ''
+    result = render(summary)
+    if len(result.encode('utf-8')) + reserve > output_tokens:
         raise CompressionBudgetError('final checkpoint exceeds output byte budget')
     return result
 
@@ -469,8 +492,7 @@ def reject_installation(agent, original, candidate, attempt, *, in_place=True):
                 if any(is_reference(record) for record in rotation_records):
                     raise CompressionBudgetError('session-local tool archive prohibits implicit session rotation')
             validate_checkpoint(compressor, original, candidate, budget['output_tokens'])
-        if best_effort:
-            validate_operational_state(candidate)
+
     except CompressionBudgetError as error:
         attempt.restore_compressor(compressor)
         refuse_replacement(compressor, attempt.snapshot.get('_previous_summary'), error)
