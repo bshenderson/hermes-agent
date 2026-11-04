@@ -1016,60 +1016,163 @@ class SessionMessagesMixin:
         """
         from hermes_state import SessionCompressionInProgressError
         def _do(conn):
-            if lock_holder is not None:
-                lock_row = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
-                if lock_row is None or lock_row["holder"] != lock_holder or float(lock_row["expires_at"]) <= time.time():
-                    raise SessionCompressionInProgressError(
-                        f"Compression lease for {session_id!r} lost before commit; refusing to publish a stale compaction")
-            patch = model_config_patch is not None
-            # on_missing="raise": never commit against a vanished session row (caller keeps the original).
-            patched_model_config = self._merge_model_config_json(
-                conn, session_id, model_config_patch, on_missing="raise") if patch else None
-            proved = self._proved_coverage(conn, session_id, covered_ids, unresolved_held, watermark)
-            if proved is not None:
-                return self._archive_named_rows(
-                    conn, session_id, compacted_messages, proved[0], tail_count=tail_count,
-                    carried_messages=carried_messages, patched_model_config=patched_model_config, patch=patch,
-                    merged_away=proved[1])
-            tail_ids, tail_tool_calls = ([], 0) if watermark is None else self._tail_rows_after_watermark(
-                conn, "SELECT id, tool_calls FROM messages WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id",
-                (session_id, int(watermark)))
-            # Rewind targets sit AT/BELOW the watermark (all the compressor saw); unbounded, a
-            # concurrent append would steal a LIMIT slot.
-            rewind_ids: list[int] = self._resolve_carried_row_ids(
-                conn, session_id, carried_messages or [])
-            if tail_count > 0:
-                bound = watermark is not None
-                rewind_ids += [int(row["id"]) for row in conn.execute(
-                    f"SELECT id FROM messages WHERE session_id = ? AND active = 1{' AND id <= ?' if bound else ''} "
-                    "ORDER BY id DESC LIMIT ?",
-                    (session_id, *((int(watermark),) if bound else ()),
-                     int(tail_count) + self._uncounted_merged_rows(compacted_messages[-int(tail_count):]))).fetchall()]
-            rewind_ids += tail_ids
-            rewind_ids = list(dict.fromkeys(rewind_ids))
-            if rewind_ids:
-                placeholders = _placeholders(rewind_ids)
-                conn.execute("UPDATE messages SET active = 0, compacted = 0 "
-                    f"WHERE session_id = ? AND id IN ({placeholders})", [session_id, *rewind_ids])
-                conn.execute(f"{_ARCHIVE_ACTIVE_SQL} AND id NOT IN ({placeholders})", [session_id, *rewind_ids])
-            else:
-                conn.execute(_ARCHIVE_ACTIVE_SQL, (session_id,))
-            # Same identity carry as publish_compression_child (#59661): carried tail copies keep the
-            # durable row's timestamp so display dedupe still collapses generations. Donors are active-only;
-            # the rewound/archived originals above never donate, so this is a no-op for a clean compaction.
-            self._carry_parent_timestamps(conn, session_id, compacted_messages)
-            inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
-            if tail_ids:
-                self._clone_message_rows(conn, tail_ids)
-                inserted += len(tail_ids)
-                tool_calls_total += tail_tool_calls
-            # A carried copy whose stored identity was computed differently lands in its own
-            # display_order group and would project twice; re-fold before publishing (#122167).
-            self._reconcile_display_orders(conn, session_id)
-            conn.execute(f"{_SET_COUNTERS_SQL}{', model_config = ?' if patch else ''} WHERE id = ?",
-                (inserted, tool_calls_total, *((patched_model_config,) if patch else ()), session_id))
-            return inserted
+            # GXTD-814 publication gate (pre-flight): a typed receipt carrier
+            # must parse under the frozen grammar BEFORE any durable effect.
+            # Model/summary prose is never scanned — only structured
+            # display_metadata. No carrier and no mint request: unchanged path.
+            from agent.compression_archive import MINT_REQUEST_KEY, validate_carriers
+            presented = validate_carriers(compacted_messages)
+            minting = any(isinstance(m, dict) and m.get(MINT_REQUEST_KEY) for m in compacted_messages or ())
+            if not presented and not minting:
+                return self._archive_compact_body(conn, session_id, compacted_messages,
+                    model_config_patch, watermark, lock_holder, tail_count,
+                    carried_messages, covered_ids, unresolved_held)
+            def _owner_profile_in_txn():
+                row = conn.execute("SELECT profile_name FROM sessions WHERE id = ?", (session_id,)).fetchone()
+                profile = row["profile_name"] if row is not None else None
+                if not isinstance(profile, str) or not profile:
+                    raise ValueError("archive owner profile unbound")
+                return profile
+            def _resolve_presented():
+                """Resolve every presented carrier, with the SAME BD-1
+                containment as the mint: a presented receipt that now exceeds
+                the KNOWN frozen cap is stale-but-nameable and never aborts
+                the compaction (the newer publication or a degraded
+                unavailable stamp becomes the truth). Identity, drift, owner,
+                and grammar faults keep the atomic refusal."""
+                from agent.compression_archive import ArchiveSourceBudgetError
+                keep = []
+                for reference in presented:
+                    try:
+                        self._resolve_archive_carrier(conn, session_id, profile, reference)
+                    except ArchiveSourceBudgetError:
+                        continue
+                    keep.append(reference)
+                return keep
+            pre_max = int(conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0])
+            profile = _owner_profile_in_txn()
+            presented = _resolve_presented()
+            result = self._archive_compact_body(conn, session_id, compacted_messages,
+                model_config_patch, watermark, lock_holder, tail_count,
+                carried_messages, covered_ids, unresolved_held)
+            if minting:
+                self._mint_archive_carrier(conn, session_id, profile, compacted_messages, pre_max)
+            elif presented:
+                # Re-resolve AFTER the write body: the same transaction must
+                # still see the exact source the receipt binds (drift between
+                # pre-flight and publish refuses the commit, not just opens it).
+                _resolve_presented()
+            return result
         return self._execute_transcript_write(_do, compacted_messages)
+
+    def _resolve_archive_carrier(self, conn, session_id: str, profile: str, reference: str) -> None:
+        """Resolve a presented receipt INSIDE the publication transaction: a
+        receipt whose bound source drifted mid-transaction fails the commit
+        atomically, preserving the original rows."""
+        from agent.compression_archive import validate_reference, _snapshot_on_conn
+        value = validate_reference(reference)
+        actual, _rows = _snapshot_on_conn(conn, session_id, profile, value["through"])
+        if actual != value:
+            raise ValueError("archive original source changed or missing")
+
+    def _mint_archive_carrier(self, conn, session_id: str, profile: str,
+                              compacted_messages: list, pre_max: int) -> None:
+        """Install the receipt minted from the REAL archived source on this
+        transaction onto the published summary row's typed metadata, then
+        re-resolve it on the same connection. The mint request key is a
+        caller-dict marker the insert serializers never persist; the receipt
+        is the only new persisted fact.
+
+        GXTD-814 BD-1 (approved policy): the ONLY mint-side failure that
+        degrades — instead of aborting — is the KNOWN source budget cap
+        (``ArchiveSourceBudgetError``: frozen MAX_ROWS/MAX_BYTES). The
+        compaction still publishes, no receipt persists, and the summary row
+        carries a machine-owned typed UNAVAILABLE status so recall refuses
+        narrowly with a clear reason. Identity, owner, and store faults keep
+        the atomic refusal."""
+        from agent.compression_archive import (
+            ArchiveSourceBudgetError, degrade_carrier, install_carrier, mint_for_publication)
+        target = next((m for m in compacted_messages or () if isinstance(m, dict)
+                       and m.get("_compressed_summary")), None)
+        if target is None:
+            raise ValueError("archive mint requires a compaction summary row")
+        row_id = target.get("_row_id")
+        if not isinstance(row_id, int) or row_id <= 0:
+            raise ValueError("archive mint requires the published summary row id")
+        try:
+            reference = mint_for_publication(self, conn, session_id, profile, pre_max)
+        except ArchiveSourceBudgetError:
+            degrade_carrier(target)
+            conn.execute(_SET_DISPLAY_META_SQL, (self._encode_display_metadata(target["display_metadata"]), row_id))
+            return
+        install_carrier(target, reference)
+        conn.execute(_SET_DISPLAY_META_SQL, (self._encode_display_metadata(target["display_metadata"]), row_id))
+        self._resolve_archive_carrier(conn, session_id, profile, reference)
+
+
+    def _archive_compact_body(self, conn, session_id: str, compacted_messages: list,
+                              model_config_patch, watermark, lock_holder, tail_count: int,
+                              carried_messages, covered_ids, unresolved_held) -> int:
+        """The original in-place compaction write body, unchanged: lease check,
+        config patch, coverage proof, archive, insert, watermark clones,
+        counters. Extracted verbatim so GXTD-814 gate wrappers can compose it
+        with or without receipt custody — no-carrier publications take this
+        path exactly as before."""
+        from hermes_state import SessionCompressionInProgressError
+        if lock_holder is not None:
+            lock_row = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
+            if lock_row is None or lock_row["holder"] != lock_holder or float(lock_row["expires_at"]) <= time.time():
+                raise SessionCompressionInProgressError(
+                    f"Compression lease for {session_id!r} lost before commit; refusing to publish a stale compaction")
+        patch = model_config_patch is not None
+        # on_missing="raise": never commit against a vanished session row (caller keeps the original).
+        patched_model_config = self._merge_model_config_json(
+            conn, session_id, model_config_patch, on_missing="raise") if patch else None
+        proved = self._proved_coverage(conn, session_id, covered_ids, unresolved_held, watermark)
+        if proved is not None:
+            return self._archive_named_rows(
+                conn, session_id, compacted_messages, proved[0], tail_count=tail_count,
+                carried_messages=carried_messages, patched_model_config=patched_model_config, patch=patch,
+                merged_away=proved[1])
+        tail_ids, tail_tool_calls = ([], 0) if watermark is None else self._tail_rows_after_watermark(
+            conn, "SELECT id, tool_calls FROM messages WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id",
+            (session_id, int(watermark)))
+        # Rewind targets sit AT/BELOW the watermark (all the compressor saw); unbounded, a
+        # concurrent append would steal a LIMIT slot.
+        rewind_ids: list[int] = self._resolve_carried_row_ids(
+            conn, session_id, carried_messages or [])
+        if tail_count > 0:
+            bound = watermark is not None
+            rewind_ids += [int(row["id"]) for row in conn.execute(
+                f"SELECT id FROM messages WHERE session_id = ? AND active = 1{' AND id <= ?' if bound else ''} "
+                "ORDER BY id DESC LIMIT ?",
+                (session_id, *((int(watermark),) if bound else ()),
+                 int(tail_count) + self._uncounted_merged_rows(compacted_messages[-int(tail_count):]))).fetchall()]
+        rewind_ids += tail_ids
+        rewind_ids = list(dict.fromkeys(rewind_ids))
+        if rewind_ids:
+            placeholders = _placeholders(rewind_ids)
+            conn.execute("UPDATE messages SET active = 0, compacted = 0 "
+                f"WHERE session_id = ? AND id IN ({placeholders})", [session_id, *rewind_ids])
+            conn.execute(f"{_ARCHIVE_ACTIVE_SQL} AND id NOT IN ({placeholders})", [session_id, *rewind_ids])
+        else:
+            conn.execute(_ARCHIVE_ACTIVE_SQL, (session_id,))
+        # Same identity carry as publish_compression_child (#59661): carried tail copies keep the
+        # durable row's timestamp so display dedupe still collapses generations. Donors are active-only;
+        # the rewound/archived originals above never donate, so this is a no-op for a clean compaction.
+        self._carry_parent_timestamps(conn, session_id, compacted_messages)
+        inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
+        if tail_ids:
+            self._clone_message_rows(conn, tail_ids)
+            inserted += len(tail_ids)
+            tool_calls_total += tail_tool_calls
+        # A carried copy whose stored identity was computed differently lands in its own
+        # display_order group and would project twice; re-fold before publishing (#122167).
+        self._reconcile_display_orders(conn, session_id)
+        conn.execute(f"{_SET_COUNTERS_SQL}{', model_config = ?' if patch else ''} WHERE id = ?",
+            (inserted, tool_calls_total, *((patched_model_config,) if patch else ()), session_id))
+        return inserted
 
     def _message_column_names(self, conn) -> list[str]:
         """Column names of the messages table, cached per-connection era."""

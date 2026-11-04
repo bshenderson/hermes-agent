@@ -124,13 +124,27 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
     session_db = agent._get_session_db_for_recall()
     archive_binding = getattr(agent, '_compression_archive_recall', None)
     if archive_binding is not None:
-        # Bound only by the owning archive consumer, never model arguments or
-        # summary text. Invalid bindings refuse; they do not fall back to broad search.
-        from agent.compression_archive import ArchiveRecall
+        # Bound only by the owning archive consumer (trusted construction),
+        # never model arguments or summary text. Invalid/presented-invalid
+        # bindings refuse; they do not fall back to broad search. A tagged
+        # TRANSIENT store-fault restriction gets one bounded recovery probe
+        # per backoff window (BD-2); a probe failure keeps the refusal.
+        from agent.compression_archive import attempt_transient_recovery_probe
+        if attempt_transient_recovery_probe(agent):
+            # Just resolved by the same owner/store: re-read and continue on
+            # the fresh binding (None -> accepted broad route below).
+            archive_binding = getattr(agent, '_compression_archive_recall', None)
+    if archive_binding is not None:
+        from agent.compression_archive import ArchiveRecall, REJECTION_PREFIX
         try:
-            if not isinstance(archive_binding, tuple) or len(archive_binding) != 2:
+            if not isinstance(archive_binding, tuple) or len(archive_binding) not in (2, 3):
                 raise ValueError('archive recall binding invalid')
-            adapter, reference = archive_binding
+            adapter, reference = archive_binding[0], archive_binding[1]
+            if isinstance(reference, str) and reference.startswith(REJECTION_PREFIX):
+                # A present-but-invalid typed receipt (or established
+                # unavailable status) retains the restricted refusal — this
+                # branch is reached instead of the broad route.
+                raise ValueError(reference)
             if (not isinstance(adapter, ArchiveRecall) or adapter._db is not session_db
                     or adapter._session_id != agent.session_id):
                 raise ValueError('archive recall owner binding changed')

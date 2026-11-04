@@ -2480,6 +2480,16 @@ def init_agent(
         agent, session_id, session_db, parent_session_id, reasoning_config, max_tokens,
         checkpoints_enabled, checkpoint_max_snapshots, checkpoint_max_total_size_mb, checkpoint_max_file_size_mb,
     )
+    # GXTD-814 resume/reconstruction producer (offline-qualified, opt-in
+    # publication upstream): rebuild the archive-receipt binding ONLY from
+    # this agent's actual bound SessionDB, its `sessions.profile_name` owner
+    # row, and the loaded tool grants. No carrier or no session row leaves the
+    # agent exactly as accepted; construction failure never blocks an agent.
+    try:
+        from agent.compression_archive import bind_resume_binding
+        bind_resume_binding(agent)
+    except Exception:
+        logger.debug("Archive resume binding skipped", exc_info=True)
 
     # Load config once for memory, skills, and compression sections
     try:

@@ -3626,6 +3626,19 @@ def _held_watermark(agent: Any, watermark: Optional[int], messages: list, verbat
     return held_archive_watermark(agent._session_db, agent.session_id, watermark, messages, verbatim_tail)
 
 
+def _archive_receipts_enabled() -> bool:
+    """GXTD-814 explicit opt-in for archive-receipt custody on in-place
+    compaction (``auxiliary.compression.archive_receipts: true``). Absent,
+    false, or unreadable config = the accepted publication path exactly;
+    nothing about the accepted strategies or counters changes."""
+    try:
+        from agent.auxiliary_client import _get_auxiliary_task_config
+        config = _get_auxiliary_task_config('compression')
+    except Exception:
+        return False
+    return isinstance(config, dict) and config.get('archive_receipts') is True
+
+
 def held_archive_watermark(
     session_db: Any, session_id: str, watermark: Optional[int], messages: list, verbatim_tail: Optional[list] = None,
     *, stale_raises: bool = False,
@@ -3718,6 +3731,11 @@ def _commit_compaction(
     commit_started_at = time.monotonic()
     split_status = "not_applicable"
     old_session_id: Optional[str] = None  # bound only once rotation begins
+    # GXTD-814 (QG-7): ONE snapshot of the opt-in per compaction commit — the
+    # mint request and the post-publication refresh cannot disagree if the
+    # config flips mid-commit. Absent/false/unreadable = accepted path.
+    archive_receipts_commit = _archive_receipts_enabled()
+
     def source_refusal(candidate):
         from agent.compression_preservation import reject_installation
         original = messages_before_compression if messages_before_compression is not None else messages
@@ -3810,12 +3828,26 @@ def _commit_compaction(
                     agent._session_db, agent.session_id,
                     messages_before_compression if messages_before_compression is not None else messages,
                     verbatim_tail)
+                if archive_receipts_commit:
+                    # GXTD-814 opt-in publication (one commit-time snapshot —
+                    # QG-7): the store mints the receipt from the REAL
+                    # archived source inside its own transaction and installs
+                    # it on the published summary's typed metadata. Config
+                    # absent/false = accepted publication.
+                    from agent.compression_archive import request_archive_mint
+                    request_archive_mint(persisted)
                 agent._session_db.archive_and_compact(
                     agent.session_id, persisted, model_config_patch={PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None},
                     watermark=_held_watermark(agent, lease.watermark, messages, verbatim_tail),
                     lock_holder=lease.holder, tail_count=tail_count, carried_messages=carried_messages,
                     covered_ids=covered_ids, unresolved_held=unresolved_held,
                 )
+                if archive_receipts_commit:
+                    # Binding refreshed after a SUCCESSFUL compaction on the
+                    # same live generation, under the SAME commit-time
+                    # opt-in snapshot (never a model-visible string).
+                    from agent.compression_archive import refresh_after_publication
+                    refresh_after_publication(agent, agent.session_id)
                 compressed = persisted
                 split_status = "in_place_committed"
                 # compress() returned marker-swept copies; stamp them as persisted or the next
