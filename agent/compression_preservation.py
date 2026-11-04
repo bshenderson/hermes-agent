@@ -222,12 +222,18 @@ def collect_state_records(compressor, messages):
     return SourceRecords([], collect_events(compressor, messages))
 
 
-def extract_state_block(summary, previous_summary, max_bytes=None):
+def extract_state_block(summary, previous_summary, max_bytes=None, *, allow_absent=False):
     """Deterministically merge model-authored Operational State blocks.
 
     Model prose has no source authority; this is conventional presentation.
     The newest non-empty value wins per field, deduping on normalized
     'field: value', so iterative compactions re-emit a complete section.
+
+    ``allow_absent`` is set only when an artifact-backed work-state pointer
+    will accompany the checkpoint (real task-artifact read confirmed). Then a
+    COMPLETELY absent section is permitted — the todo_list artifact, not model
+    prose, carries work state. A PARTIAL section still refuses either way:
+    present-but-incomplete state is exactly the misleading case.
     """
     from agent import context_compressor as cc
 
@@ -251,10 +257,16 @@ def extract_state_block(summary, previous_summary, max_bytes=None):
                     merged[key] = value
         return {key: merged[key] for key in order if merged.get(key)}
 
+    had_section = bool(_STATE.search(summary or ''))
     merged = fields_of(previous_summary or '')
     merged.update({k: v for k, v in fields_of(summary).items() if v})
     missing = [key for key in _STATE_FIELDS if not merged.get(key)]
     if missing:
+        if allow_absent and not had_section:
+            # No section anywhere (fresh pass, nothing to carry): the verified
+            # task-artifact pointer is the continuity authority for this
+            # checkpoint. Never fill gaps with system placeholders.
+            return (summary or '').strip(), {}
         # Never fill gaps with system placeholders: a model that fails to state
         # a field (and has no carried value) must not install a checkpoint that
         # claims "None stated" on its behalf.
@@ -272,7 +284,10 @@ def extract_state_block(summary, previous_summary, max_bytes=None):
 
 
 def validate_operational_state(candidate):
-    """Final gate: an installed best-effort checkpoint must carry all four fields."""
+    """Final gate: an installed best-effort checkpoint carries a complete
+    Operational State section, or — when the deterministic Work State Authority
+    pointer was backed by a real task-artifact read — none at all. A present
+    but incomplete section always refuses."""
     from agent.context_compressor import is_compaction_summary_message
     for message in candidate:
         if not is_compaction_summary_message(message):
@@ -280,6 +295,8 @@ def validate_operational_state(candidate):
         text = _text(message.get('content'))
         match = _STATE.search(text)
         if not match:
+            if WORK_STATE_POINTER_HEADING in text:
+                continue  # artifact-backed continuity; prose carries no claim
             raise CompressionBudgetError('best-effort checkpoint lacks Operational State')
         found = set()
         for line in match.group(1).splitlines():

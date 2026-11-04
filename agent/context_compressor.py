@@ -5748,16 +5748,20 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         # Phase 4: Assemble compressed message list
         if best_effort:
+            # Mechanical link first, not prompt prose: the pointer is permitted
+            # only after a real session-DB read confirms a paired todo_list
+            # artifact. That verified artifact may then stand in for a
+            # completely-absent model-authored state section (partial never
+            # passes); without it, the four-field shape gate is strict.
+            from agent.compression_preservation import work_state_pointer
+            pointer = work_state_pointer(self)
             try:
                 summary, _ = extract_state_block(
-                    summary, preservation_previous_summary, self._operational_state_max_bytes)
+                    summary, preservation_previous_summary, self._operational_state_max_bytes,
+                    allow_absent=bool(pointer))
             except CompressionBudgetError as error:
                 refuse_replacement(self, preservation_previous_summary, error)
                 return canonical_messages
-            # Mechanical link, not prompt prose: emit the work-state pointer only
-            # when a real session-DB read confirms a paired todo_list artifact.
-            from agent.compression_preservation import work_state_pointer
-            pointer = work_state_pointer(self)
             if pointer:
                 summary = summary + '\n\n' + pointer
         if preservation_budget:

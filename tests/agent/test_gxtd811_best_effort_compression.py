@@ -331,11 +331,56 @@ def test_work_state_pointer_requires_real_todo_artifact_read(tmp_path, monkeypat
 
 
 def test_unbound_session_emits_no_pointer(best_effort_compressor):
-    # No session binding at all: compress still works, pointer is silent.
+    # No session binding at all: compress still works, pointer is silent,
+    # and the four-field shape gate stays strict (no artifact to stand in).
     from agent.compression_preservation import WORK_STATE_POINTER_HEADING
+    monkey_state = state_reply().split(OPERATIONAL_STATE_HEADING)[0]
+    best_effort_compressor._call_summary_llm = lambda *_: monkey_state
     original = history()
+    before = copy.deepcopy(original)
     result = best_effort_compressor.compress(original, force=True)
-    assert result != original, best_effort_compressor._last_summary_error
+    assert result == before, 'absent state without an artifact must still refuse'
     installed = '\n'.join(str(r.get('content', '')) for r in result
                           if is_compaction_summary_message(r))
     assert WORK_STATE_POINTER_HEADING not in installed
+
+
+def test_verified_artifact_stands_in_for_absent_state_section(tmp_path, monkeypatch):
+    # Artifact-backed loosening: with a REAL paired todo_list artifact in the
+    # session DB, a summary that omits the state section entirely may install
+    # (the pointer + artifact carry continuity). A PARTIAL section still
+    # refuses even with the artifact.
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    _write_config(tmp_path, 'best_effort')
+    from agent.context_compressor import ContextCompressor
+    from agent.compression_preservation import WORK_STATE_POINTER_HEADING
+    c = ContextCompressor(model='fixture', config_context_length=100000, quiet_mode=True,
+                          protect_first_n=1, protect_last_n=2, abort_on_summary_failure=True)
+    c.tail_token_budget = 10
+    body_only = (f'{HISTORICAL_TASK_HEADING}\n{_NO_USER_TASK_SENTINEL}\n\n'
+                 '## Overview\nRoutine work, no state section authored.')
+    monkeypatch.setattr(c, '_call_summary_llm', lambda *_: body_only)
+    with SessionDB(db_path=tmp_path / 'state.db') as db:
+        db.create_session('aa', 'cli', profile_name='default')
+        c.bind_session_state(session_db=db, session_id='aa')
+        rows = history()
+        db.append_messages_batch('aa', copy.deepcopy(rows))
+        _append_todo_pair(db, 'aa', 'aa-1')
+        current = db.get_messages_as_conversation('aa', repair_alternation=True)
+        result = c.compress(copy.deepcopy(current), force=True)
+        assert result != current, c._last_summary_error
+        assert not c._last_compress_aborted
+        installed = '\n'.join(str(r.get('content', '')) for r in result
+                              if is_compaction_summary_message(r))
+        assert WORK_STATE_POINTER_HEADING in installed
+        assert OPERATIONAL_STATE_HEADING not in installed, 'no state fabricated'
+        # Artifact still independently readable — the authority split holds.
+        assert json.loads(db.get_latest_todo_result('aa'))['revision'] == 2
+
+        # Partial state section present: refuses even with the verified artifact.
+        partial = body_only + '\n' + OPERATIONAL_STATE_HEADING + '\nCurrent Task: half\n'
+        monkeypatch.setattr(c, '_call_summary_llm', lambda *_: partial)
+        again_input = db.get_messages_as_conversation('aa', repair_alternation=True)
+        before2 = copy.deepcopy(again_input)
+        result2 = c.compress(copy.deepcopy(again_input), force=True)
+        assert result2 == before2, 'partial state must refuse even artifact-backed'
