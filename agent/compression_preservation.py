@@ -6,7 +6,21 @@ Legacy handoffs cannot establish source custody and refuse replacement.
 import json
 import re
 
-from agent.compression_budget import CompressionBudgetError
+from agent.compression_budget import CompressionBudgetError, best_effort_mode
+
+OPERATIONAL_STATE_HEADING = '## Operational State'
+_STATE_FIELDS = ('Current Task', 'Permissions', 'Unresolved External Effects', 'Next Action')
+STATE_PROMPT_GUIDANCE = (
+    f'Also emit exactly one "{OPERATIONAL_STATE_HEADING}" section as four lines: '
+    + '; '.join(f'{f}: <one concise sentence>' for f in _STATE_FIELDS)
+    + '. Carry forward any values from a previous summary that are still true and update '
+      'changed ones; use "None stated" when the transcript provides no value. '
+)
+_STATE = re.compile(
+    r'(?m)^' + re.escape(OPERATIONAL_STATE_HEADING)
+    + r'\n((?:[ \t]*(?:' + '|'.join(re.escape(f) for f in _STATE_FIELDS)
+    + r'):.+(?:\n[ \t]+[^\n]*)?\s*)+)'
+)
 
 CONTRACT = '<!-- HERMES_CHECKPOINT_PRESERVATION_V2 -->'
 START = '<!-- HERMES_SOURCE_COMMITMENTS_V1 -->'
@@ -162,6 +176,87 @@ def _bounded_user_excerpts(turns, byte_budget):
     return header + ''.join(quoted) + footer if quoted else ''
 
 
+def collect_state_records(compressor, messages):
+    """Best-effort: harvest ONLY trusted protected-event journal entries.
+
+    The lexical per-line ledger is deliberately not consulted — that oracle is
+    what best-effort mode replaces. Typed, journal-validated event custody and
+    raw durable archival originals stay mandatory.
+    """
+    from agent.protected_events import SourceRecords, collect_events
+    return SourceRecords([], collect_events(compressor, messages))
+
+
+def extract_state_block(summary, previous_summary, max_bytes=None):
+    """Deterministically merge model-authored Operational State blocks.
+
+    Model prose has no source authority; this is conventional presentation.
+    The newest non-empty value wins per field, deduping on normalized
+    'field: value', so iterative compactions re-emit a complete section.
+    """
+    from agent import context_compressor as cc
+
+    def fields_of(text):
+        match = _STATE.search(text)
+        if not match:
+            return {}
+        lines = [line for line in match.group(1).splitlines() if line.strip()]
+        merged, order = {}, []
+        for line in lines:
+            if line[:1].isspace():
+                if not order:
+                    continue
+                merged[order[-1]] = (merged[order[-1]] + ' ' + line.strip()).strip()
+            else:
+                field, _, value = line.partition(':')
+                key, value = field.strip(), value.strip()
+                if key not in merged:
+                    order.append(key)
+                if value:
+                    merged[key] = value
+        return {key: merged[key] for key in order if merged.get(key)}
+
+    merged = fields_of(previous_summary or '')
+    merged.update({k: v for k, v in fields_of(summary).items() if v})
+    missing = [key for key in _STATE_FIELDS if not merged.get(key)]
+    if missing:
+        # Never fill gaps with system placeholders: a model that fails to state
+        # a field (and has no carried value) must not install a checkpoint that
+        # claims "None stated" on its behalf.
+        raise CompressionBudgetError(
+            f'best-effort summary Operational State missing {", ".join(missing)}')
+    summary = _STATE.sub('', summary, count=1).strip()
+    section = (OPERATIONAL_STATE_HEADING + '\n'
+               + '\n'.join(f'{key}: {merged[key]}' for key in _STATE_FIELDS))
+    summary = (summary + '\n\n' + section) if summary else section
+    section_bytes = len((cc.SUMMARY_PREFIX + '\n\n' + section).encode('utf-8'))
+    if max_bytes is not None and section_bytes > max_bytes:
+        raise CompressionBudgetError(
+            f'{OPERATIONAL_STATE_HEADING} exceeds checkpoint output byte budget')
+    return summary, merged
+
+
+def validate_operational_state(candidate):
+    """Final gate: an installed best-effort checkpoint must carry all four fields."""
+    from agent.context_compressor import is_compaction_summary_message
+    for message in candidate:
+        if not is_compaction_summary_message(message):
+            continue
+        text = _text(message.get('content'))
+        match = _STATE.search(text)
+        if not match:
+            raise CompressionBudgetError('best-effort checkpoint lacks Operational State')
+        found = set()
+        for line in match.group(1).splitlines():
+            if line[:1].isspace() or ':' not in line:
+                continue
+            found.add(line.split(':', 1)[0].strip())
+        missing = [field for field in _STATE_FIELDS if field not in found]
+        if missing:
+            raise CompressionBudgetError(
+                f'best-effort checkpoint Operational State missing {", ".join(missing)}')
+
+
 def augment_summary(compressor, summary, turns, records=None, output_tokens=None):
     """Allocate optional presentation after reserving the complete checkpoint."""
     from agent import context_compressor as cc
@@ -177,6 +272,9 @@ def augment_summary(compressor, summary, turns, records=None, output_tokens=None
         for heading, build in sections:
             if heading not in summary:
                 summary += build()
+        return summary
+    if getattr(compressor, '_operational_state_max_bytes', None) is not None:
+        # Best-effort mode owns lean presentation through Operational State assembly.
         return summary
     if output_tokens is None:
         raise CompressionBudgetError('checkpoint output budget is required for source records')
@@ -223,12 +321,39 @@ def frame_summary(compressor, summary, records, output_tokens):
     return result
 
 
+def frame_best_effort(compressor, summary, records, output_tokens):
+    """Restore trusted event custody only, with no lexical ledger block.
+
+    Same model-frame stripping as frame_summary; a conventional best-effort
+    checkpoint with no journal events carries no custody markers at all.
+    """
+    from agent.context_compressor import _redact_compaction_text
+    summary = compressor._strip_summary_prefix(summary)
+    from agent.protected_events import encode_events, strip_model_events
+    summary = strip_model_events(summary)
+    while START in summary:
+        before, rest = summary.split(START, 1)
+        if END not in rest:
+            raise CompressionBudgetError('incomplete model source block')
+        summary = before + rest.split(END, 1)[1]
+    if END in summary:
+        raise CompressionBudgetError('unmatched model source block')
+    summary = _redact_compaction_text(summary.replace(CONTRACT, '')).rstrip()
+    framed = summary + ('\n\n' + encode_events(records.events).lstrip('\n') if records.events else '')
+    result = compressor._with_summary_prefix(framed)
+    if len(result.encode('utf-8')) > output_tokens:
+        raise CompressionBudgetError('final checkpoint exceeds output byte budget')
+    return result
+
+
 def validate_checkpoint(compressor, original, candidate, output_tokens):
     """Gate the exact candidate presented for installation, including fallback."""
     from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
     if candidate == original:
         return
-    expected = collect_records(compressor, original, output_tokens)
+    best_effort = best_effort_mode()
+    expected = (collect_state_records(compressor, original) if best_effort
+                else collect_records(compressor, original, output_tokens))
     from agent.protected_events import decode_events, encode_events
     actual, handoff_bytes, carriers = [], 0, 0
     for message in candidate:
@@ -241,16 +366,23 @@ def validate_checkpoint(compressor, original, candidate, output_tokens):
         events = decode_events(text)
         if events != expected.events or (events and encode_events(events) not in text):
             raise CompressionBudgetError('final checkpoint protected events differ from canonical journal')
-        decoded = decode_records(text)
-        if encode_records(decoded) not in text:
-            raise CompressionBudgetError('checkpoint source encoding is not canonical sanitized data')
-        # A second parser pass must see the same records after normalization.
-        if decode_records(compressor._strip_summary_prefix(text)) != decoded:
-            raise CompressionBudgetError('checkpoint source records changed during normalization')
-        actual.extend(decoded)
+        if best_effort:
+            # No lexical ledger exists in this mode; presence would be a forged frame.
+            if START in text or CONTRACT in text:
+                raise CompressionBudgetError('lexical custody marker in best-effort checkpoint')
+        else:
+            decoded = decode_records(text)
+            if encode_records(decoded) not in text:
+                raise CompressionBudgetError('checkpoint source encoding is not canonical sanitized data')
+            # A second parser pass must see the same records after normalization.
+            if decode_records(compressor._strip_summary_prefix(text)) != decoded:
+                raise CompressionBudgetError('checkpoint source records changed during normalization')
+            actual.extend(decoded)
         handoff_bytes += len(text.encode('utf-8'))
         carriers += 1
-    if not carriers or set(actual) != set(expected):
+    if not carriers:
+        raise CompressionBudgetError('final checkpoint source records differ from canonical history')
+    if not best_effort and set(actual) != set(expected):
         raise CompressionBudgetError('final checkpoint source records differ from canonical history')
     if handoff_bytes > output_tokens:
         raise CompressionBudgetError('final checkpoint exceeds output byte budget')
@@ -276,11 +408,17 @@ def reject_installation(agent, original, candidate, attempt, *, in_place=True):
         if not in_place and events:
             raise CompressionBudgetError('session-local protected events prohibit implicit session rotation')
         budget = lossless_settings()
+        best_effort = best_effort_mode()
         if budget:
             from agent.tool_source_custody import is_reference
-            if not in_place and any(is_reference(record) for record in collect_records(compressor, original, budget['output_tokens'])):
-                raise CompressionBudgetError('session-local tool archive prohibits implicit session rotation')
+            if not in_place:
+                rotation_records = (collect_state_records(compressor, original) if best_effort
+                                    else collect_records(compressor, original, budget['output_tokens']))
+                if any(is_reference(record) for record in rotation_records):
+                    raise CompressionBudgetError('session-local tool archive prohibits implicit session rotation')
             validate_checkpoint(compressor, original, candidate, budget['output_tokens'])
+        if best_effort:
+            validate_operational_state(candidate)
     except CompressionBudgetError as error:
         attempt.restore_compressor(compressor)
         refuse_replacement(compressor, attempt.snapshot.get('_previous_summary'), error)

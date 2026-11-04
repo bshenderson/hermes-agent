@@ -17,6 +17,10 @@ def configured_summary(compressor, turns, source, budget, started, records):
     strategy = _get_auxiliary_task_config('compression').get('summary_strategy', 'narrative')
     if strategy == 'narrative':
         return None
+    if strategy == 'best_effort':
+        # Explicit best-effort mode: the caller's bounded map/reduce narrative
+        # pass runs with no lexical-record requirement. Enforced separately.
+        return None
     if strategy not in {'source_quotes', 'source_quotes_custody'}:
         raise CompressionBudgetError('unsupported compression summary strategy')
     from agent.compression_preservation import collect_records

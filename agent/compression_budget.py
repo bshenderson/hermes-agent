@@ -9,6 +9,24 @@ class CompressionBudgetError(ValueError):
     """A configured lossless pass cannot safely fit its prompt."""
 
 
+def best_effort_mode():
+    """Explicit opt-in: conventional bounded summaries instead of the mandatory lexical ledger.
+
+    Requires ``lossless_input`` (complete-input bounded chunking stays); it only
+    replaces the per-line lexical custody oracle with a required explicit
+    Operational State section. Protected-event journal custody is unchanged.
+    """
+    from agent.auxiliary_client import _get_auxiliary_task_config
+    config = _get_auxiliary_task_config('compression')
+    strategy = config.get('summary_strategy')
+    if strategy != 'best_effort':
+        return False
+    if config.get('lossless_input') is not True:
+        raise CompressionBudgetError(
+            "best_effort compression requires lossless_input complete-input chunking")
+    return True
+
+
 def lossless_settings():
     from agent.auxiliary_client import _get_auxiliary_task_config
     config = _get_auxiliary_task_config('compression')
