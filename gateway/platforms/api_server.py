@@ -4255,7 +4255,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
         approval_session_key: Optional[str] = None, media_file_turn=None, media_request_prompt=None,
-        domain_action_turn=None) -> tuple:
+        domain_action_turn=None, owned_chat_history=None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4316,6 +4316,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         precision_availability_profile=request_profile)
                     if agent_ref is not None:
                         agent_ref[0] = agent
+                    if owned_chat_history is not None:
+                        from agent.owned_chat_history import OwnedChatHistory
+                        if not isinstance(owned_chat_history, OwnedChatHistory):
+                            raise ValueError('Invalid internal owned chat history binding')
+                        agent._owned_chat_history = owned_chat_history
                     if resume_unanswered_turn:
                         # A dispatcher's re-run of a failed delivery turn: the DM's own row is already
                         # in the store (the failed attempt persisted it at turn start), so continue THAT

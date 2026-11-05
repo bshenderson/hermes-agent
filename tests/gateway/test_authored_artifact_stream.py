@@ -16,6 +16,11 @@ def test_real_writer_emits_artifact_event_before_done(tmp_path, monkeypatch):
 
 async def _exercise_writer(tmp_path, monkeypatch):
     from PIL import Image
+    from gateway.platforms import base
+    # The gateway caches its default profile root at import, before pytest's
+    # per-test home isolation. Keep profile enumeration inside this fixture.
+    monkeypatch.setattr(base, '_HERMES_ROOT', tmp_path / 'hermes-root')
+    monkeypatch.setattr(base, 'MEDIA_DELIVERY_SAFE_ROOTS', (tmp_path,))
     png = tmp_path / 'diagram.png'
     Image.new('RGB', (8, 8), 'green').save(png)
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))

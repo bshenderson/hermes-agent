@@ -6,8 +6,9 @@ balanced start/finish marks. Extracted from ``run_agent.py``; every method resol
 MRO unchanged.
 """
 import logging
+import sys
 import uuid
-from contextlib import suppress
+
 from typing import Any, Dict, Generator, List, Optional
 
 from agent.lazy_forward import forward as _forward
@@ -76,6 +77,17 @@ class TurnFacadeMixin:
         token = affinity_token = acct_token = None
         task_started = task_finished = False
         relay_outcome = "failed"
+        primary_failure = None
+        cleanup_failures = []
+
+        def retire(callback, *args, **kwargs):
+            """Attempt owned teardown without replacing the turn's primary failure."""
+            try:
+                callback(*args, **kwargs)
+            except BaseException as error:
+                cleanup_failures.append(error)
+                if primary_failure is not None:
+                    primary_failure.add_note(f'Turn finalization failed: {error!r}')
 
         try:
             # First statement of the try so the finally's note_turn_finished balances every exit.
@@ -160,7 +172,13 @@ class TurnFacadeMixin:
                     # Post-loop relay/task finalization must not receive a late refresh interrupt;
                     # the interrupt clear itself waits for the thread join in the outer finally.
                     if lease is not None:
-                        lease.stop_refresher()
+                        primary_error = sys.exception()
+                        try:
+                            lease.stop_refresher()
+                        except BaseException as cleanup_error:
+                            if primary_error is None:
+                                raise
+                            primary_error.add_note(f'Lease stop failed: {cleanup_error!r}')
             terminal = result if isinstance(result, dict) else {}
             relay_outcome = (
                 "cancelled" if terminal.get("interrupted") is True
@@ -173,6 +191,7 @@ class TurnFacadeMixin:
                 finish_task_run(**task_context, result=result)
             return result
         except BaseException as exc:
+            primary_failure = exc
             if isinstance(exc, (KeyboardInterrupt, InterruptedError)) or (
                 type(exc).__name__ == "CancelledError"
             ):
@@ -180,42 +199,37 @@ class TurnFacadeMixin:
             elif isinstance(exc, TimeoutError):
                 relay_outcome = "timed_out"
             if relay_turn is not None:
-                relay_runtime.SESSION_COORDINATOR.finish_logical_calls(
+                retire(relay_runtime.SESSION_COORDINATOR.finish_logical_calls,
                     relay_turn, outcome=relay_outcome
                 )
             if task_started and not task_finished:
                 task_finished = True
-                finish_task_run(**task_context, error=exc)
+                retire(finish_task_run, **task_context, error=exc)
             raise
         finally:
-            try:
-                if relay_turn is not None:
-                    relay_runtime.SESSION_COORDINATOR.end_turn(relay_turn, outcome=relay_outcome)
-            finally:
-                try:
-                    if relay_lease is not None:
-                        relay_runtime.SESSION_COORDINATOR.release_conversation(relay_lease)
-                finally:
-                    if lease is not None:
-                        lease.stop_refresher()
-                        lease.join_threads()
-                        lease.clear_interrupt()  # refresher interrupt between stop and join; AFTER join
-                        lease.release()
-                    # Always clear mid-turn labels on exit — including interrupted early returns
-                    # that skip finalize_turn. Keep ts.
-                    with suppress(Exception):
-                        self._reset_activity_labels_after_turn()
-                    if getattr(self, "_relay_pending_turn_id", None) == relay_turn_id:
-                        self._relay_pending_turn_id = None
-                    if acct_token is not None:
-                        reset_accounting_context(acct_token)
-                    if token is not None:
-                        reset_conversation_context(token)
-                    if affinity_token is not None:
-                        reset_affinity_scope(affinity_token)
-                    # Balance note_turn_started so the idle queue's live-turn count cannot leak.
-                    with suppress(Exception):
-                        _review_queue.note_turn_finished()
+            if relay_turn is not None:
+                retire(relay_runtime.SESSION_COORDINATOR.end_turn, relay_turn, outcome=relay_outcome)
+            if relay_lease is not None:
+                retire(relay_runtime.SESSION_COORDINATOR.release_conversation, relay_lease)
+            if lease is not None:
+                for cleanup in (lease.stop_refresher, lease.join_threads,
+                                lease.clear_interrupt, lease.release):
+                    retire(cleanup)
+            retire(self._reset_activity_labels_after_turn)
+            if getattr(self, "_relay_pending_turn_id", None) == relay_turn_id:
+                self._relay_pending_turn_id = None
+            if acct_token is not None:
+                retire(reset_accounting_context, acct_token)
+            if token is not None:
+                retire(reset_conversation_context, token)
+            if affinity_token is not None:
+                retire(reset_affinity_scope, affinity_token)
+            retire(_review_queue.note_turn_finished)
+            if primary_failure is None and cleanup_failures:
+                first_error = cleanup_failures[0]
+                for error in cleanup_failures[1:]:
+                    first_error.add_note(f'Additional finalization failure: {error!r}')
+                raise first_error
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """Final response string of one turn; ``stream_callback`` receives each text delta."""

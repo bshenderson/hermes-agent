@@ -762,7 +762,21 @@ class OpenAICompatRoutesMixin:
         # X-Hermes-Session-Id continues an existing session (history from state.db, not the body);
         # requires a configured API key or any client could read history by guessing ids.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
-        if provided_session_id:
+        owned_archive = None
+        if artifact_origin and domain_action_turn is None and media_file_turn is None:
+            from gateway.platforms.api_server_archive_chat import ArchiveChatError, resolve_owned_history
+            try:
+                owned_archive = await resolve_owned_history(
+                    self, artifact_origin, _api_request_profile.get() or 'default',
+                    history, provided_session_id)
+            except ArchiveChatError as error:
+                return _error_response(str(error), error.status)
+        if owned_archive is not None:
+            # Verified subject/chat/profile owns this native transcript. Keep
+            # server-expanded priced rows and typed receipts across UI turns;
+            # never replay raw client history over a published compaction.
+            session_id, history = owned_archive
+        elif provided_session_id:
             if not self._api_key:
                 logger.warning(
                     "Session continuation via X-Hermes-Session-Id rejected: "
@@ -828,6 +842,15 @@ class OpenAICompatRoutesMixin:
             # id from a header-less client is NOT: delegate_task keeps its forced-sync fallback
             # there — the wake would hard-fail or land in history that client never reloads.
             session_history_delivery=("1" if provided_session_id else ""))
+        owned_cache_scope = None
+        if owned_archive is not None:
+            from agent.owned_chat_history import OwnedChatHistory
+            from gateway.platforms.api_server_archive_chat import owned_session_id
+            owned_cache_scope = owned_session_id(artifact_origin, _api_request_profile.get() or 'default')
+            run_kwargs['owned_chat_history'] = OwnedChatHistory(
+                owned_cache_scope,
+                _api_request_profile.get() or 'default',
+                artifact_origin['subject_id'], artifact_origin['chat_id'])
         # This is presentation only. The ordinary API-key/session authorization
         # above still applies; it grants no internal ingress or control authority.
         if media_file_turn is not None:
@@ -891,6 +914,7 @@ class OpenAICompatRoutesMixin:
             fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream",
                               "hermes_notification_category"],
             route="chat_completions",
+            ownership_scope=owned_cache_scope,
         )
         if err is not None:
             return err
@@ -940,7 +964,8 @@ class OpenAICompatRoutesMixin:
 
     async def _run_idempotent(
         self, request: web.Request, body: dict[str, Any], compute, *,
-        log_label: str, fingerprint_keys: list[str], route: str) -> tuple:
+        log_label: str, fingerprint_keys: list[str], route: str,
+        ownership_scope: Optional[str] = None) -> tuple:
         """Run ``compute()`` once per (principal scope, logical route, Idempotency-Key) + body fingerprint
         -> ``((result, usage), None)`` or ``(None, 500 response)``.
 
@@ -956,6 +981,10 @@ class OpenAICompatRoutesMixin:
         try:
             if idempotency_key:
                 principal_scope = self._run_idempotency_scope(request)
+                if ownership_scope is not None:
+                    # Internal verified profile/subject/chat root, not client-selected
+                    # headers or volatile per-message signature/timestamp fields.
+                    principal_scope += '\0owned-chat\0' + ownership_scope
                 scoped_key = f"{principal_scope}\0{route}\0{idempotency_key}"
                 fp = _make_request_fingerprint(body, keys=fingerprint_keys)
                 result, usage = await _idem_cache.get_or_set(scoped_key, fp, compute)

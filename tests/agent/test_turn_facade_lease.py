@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from agent.turn_facade_lease import (
     LEASE_TTL_SECONDS,
     DurableTurnLease,
@@ -59,6 +61,60 @@ def _admit(agent, history=None):
         task_context={"session_id": "s1", "task_id": "t", "platform": "cli"},
         conversation_history=history,
     )
+
+
+@pytest.mark.parametrize('unavailable', ['db', 'id', 'disabled', 'protocol'])
+def test_owned_turn_refuses_unavailable_durable_admission(unavailable):
+    from agent.owned_chat_history import OwnedChatHistory
+    agent = _agent(_Db())
+    agent._owned_chat_history = OwnedChatHistory('s1', 'default', 'subject', 'chat')
+    if unavailable == 'db':
+        agent._session_db = None
+    elif unavailable == 'disabled':
+        agent._persist_disabled = True
+    elif unavailable == 'protocol':
+        agent._session_db = object()
+    with pytest.raises(ValueError, match='Owned archive chat requires durable admission'):
+        admit_durable_turn_lease(
+            agent, session_id='' if unavailable == 'id' else 's1',
+            relay_turn_id='owned-refusal', task_context={'platform': 'api_server'},
+            conversation_history=[])
+
+
+def test_constructor_failure_releases_exact_acquired_holder():
+    db = _Db()
+    agent = _agent(db, _session_turn_lease_refresh_interval='invalid')
+    with pytest.raises(ValueError, match='invalid'):
+        _admit(agent)
+    assert len(db.events) == 2
+    assert db.events[0][0] == 'acquire'
+    assert db.events[1] == ('release', *db.events[0][1:])
+    assert getattr(agent, '_active_session_turn_lease_holder', None) is None
+
+
+@pytest.mark.parametrize('failure', ['construction', 'build'])
+@pytest.mark.parametrize('release_error', [OSError, BaseException])
+def test_admission_rollback_release_failure_preserves_primary(monkeypatch, failure, release_error):
+    db = _Db()
+    agent = _agent(db)
+
+    def release_failure(session_id, holder):
+        db.events.append(('release-failed', session_id, holder))
+        raise release_error('rollback-release-fault')
+
+    def build_failure(self):
+        raise ValueError('primary-build-fault')
+
+    monkeypatch.setattr(db, 'release_session_turn_lease', release_failure)
+    if failure == 'construction':
+        agent._session_turn_lease_refresh_interval = 'primary-construction-fault'
+    else:
+        monkeypatch.setattr(DurableTurnLease, 'build_threads', build_failure)
+    with pytest.raises(ValueError, match='primary-'):
+        _admit(agent)
+    assert len(db.events) == 2
+    assert db.events[1] == ('release-failed', *db.events[0][1:])
+    assert getattr(agent, '_active_session_turn_lease_holder', None) is None
 
 
 def test_fresh_row_leases_with_seed_kept_and_persist_disabled_skips(monkeypatch):

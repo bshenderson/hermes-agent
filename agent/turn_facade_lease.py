@@ -115,11 +115,10 @@ class DurableTurnLease:
         agent = self.agent
         try:
             self.db.release_session_turn_lease(self.session_id, self.holder)
-        except Exception:
-            logger.error("Failed to release session turn lease: %s", self.session_id, exc_info=True)
-        if getattr(agent, "_active_session_turn_lease_holder", None) == self.holder:
-            agent._active_session_turn_lease_holder = None
-            agent._active_session_turn_lease_ttl_seconds = None
+        finally:
+            if getattr(agent, "_active_session_turn_lease_holder", None) == self.holder:
+                agent._active_session_turn_lease_holder = None
+                agent._active_session_turn_lease_ttl_seconds = None
 
     def is_turn_active(self) -> bool:
         with self._lock:
@@ -305,6 +304,11 @@ def admit_durable_turn_lease(
     fails; the caller returns it verbatim."""
     db = getattr(agent, "_session_db", None)
     admission = TurnLeaseAdmission(conversation_history=conversation_history)
+    if getattr(agent, '_owned_chat_history', None) is not None and (
+        db is None or not session_id or getattr(agent, '_persist_disabled', False)
+        or not callable(getattr(type(db), 'acquire_session_turn_lease', None))
+    ):
+        raise ValueError('Owned archive chat requires durable admission')
     if db is None or not session_id:
         return admission
     # Check the concrete type: MagicMock-style shims accept any attribute without the protocol.
@@ -352,12 +356,14 @@ def admit_durable_turn_lease(
 
     # Assign only after admission so the finally cannot release a holder that never owned the
     # row; persist paths read the agent attr so a late flush is fenced in the same transaction.
-    lease = DurableTurnLease(
-        agent, db, session_id, holder, expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor),
-    )
-    agent._active_session_turn_lease_holder = holder
-    agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS
+    lease = None
     try:
+        lease = DurableTurnLease(
+            agent, db, session_id, holder,
+            expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor),
+        )
+        agent._active_session_turn_lease_holder = holder
+        agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS
         # Read the row only now: the previous holder may have created or deleted it while this
         # turn waited, so an answer from before admission can be stale either way.
         durable = _durable_session_exists(db, session_id)
@@ -394,10 +400,27 @@ def admit_durable_turn_lease(
                     and "_row_id" not in m
                 )
                 admission.conversation_history = reloaded
+        owned_history = getattr(agent, '_owned_chat_history', None)
+        if owned_history is not None:
+            from agent.owned_chat_history import OwnedChatHistory
+            if not isinstance(owned_history, OwnedChatHistory):
+                raise ValueError('Invalid internal owned chat history binding')
+            if agent.session_id != session_id:
+                raise ValueError('Owned archive chat changed during turn admission')
+            admission.conversation_history = owned_history.load_after_admission(db, session_id, holder)
         lease.build_threads()
-    except BaseException:
+    except BaseException as primary_error:
         # The façade never saw this lease; release here so an admitted row is not leaked.
-        lease.release()
+        if lease is not None:
+            try:
+                lease.release()
+            except BaseException as release_error:
+                primary_error.add_note(f'Turn admission rollback release failed: {release_error!r}')
+        else:
+            try:
+                db.release_session_turn_lease(session_id, holder)
+            except BaseException as release_error:
+                primary_error.add_note(f'Turn construction rollback release failed: {release_error!r}')
         raise
     admission.lease = lease
     return admission

@@ -69,6 +69,131 @@ def _agent_with_db(db, *, session_id="stale-parent", platform="desktop"):
     return agent
 
 
+@pytest.mark.parametrize('cleanup', ['stop_refresher', 'join_threads', 'clear_interrupt'])
+@pytest.mark.parametrize('primary_failure', [False, True])
+def test_facade_cleanup_fault_still_releases_and_resets(monkeypatch, cleanup, primary_failure):
+    from agent.turn_facade_lease import DurableTurnLease
+    db = _DB()
+    agent = _agent_with_db(db)
+    resets = []
+    agent._reset_activity_labels_after_turn = lambda: resets.append('labels')
+
+    def loop(*args, **kwargs):
+        if primary_failure:
+            raise RuntimeError('primary-loop-fault')
+        return {'final_response': 'ok', 'messages': [], 'failed': False}
+
+    def broken_cleanup(self, *args, **kwargs):
+        raise ValueError('cleanup-fault')
+
+    monkeypatch.setattr('agent.conversation_loop.run_conversation', loop)
+    monkeypatch.setattr(DurableTurnLease, cleanup, broken_cleanup)
+    with pytest.raises(RuntimeError if primary_failure else ValueError,
+                       match='primary-loop-fault' if primary_failure else 'cleanup-fault'):
+        AIAgent.run_conversation(agent, 'new message', conversation_history=[])
+    assert db.events[-1][0] == 'release'
+    assert sum(event[0] == 'release' for event in db.events) == 1
+    assert agent._active_session_turn_lease_holder is None
+    assert resets == ['labels']
+
+
+@pytest.mark.parametrize('primary_failure', [False, True])
+def test_database_release_failure_surfaces_after_remaining_retirement(monkeypatch, primary_failure):
+    db = _DB()
+    agent = _agent_with_db(db)
+    retired = []
+    agent._reset_activity_labels_after_turn = lambda: retired.append('labels')
+
+    def loop(*args, **kwargs):
+        if primary_failure:
+            raise RuntimeError('primary-loop-fault')
+        return {'final_response': 'ok', 'messages': []}
+
+    def broken_db_release(session_id, holder):
+        db.events.append(('release-failed', session_id, holder))
+        raise OSError('database-release-fault')
+
+    monkeypatch.setattr('agent.conversation_loop.run_conversation', loop)
+    monkeypatch.setattr(db, 'release_session_turn_lease', broken_db_release)
+    with pytest.raises(RuntimeError if primary_failure else OSError,
+                       match='primary-loop-fault' if primary_failure else 'database-release-fault'):
+        AIAgent.run_conversation(agent, 'new message', conversation_history=[])
+    assert agent._active_session_turn_lease_holder is None
+    assert retired == ['labels']
+    assert sum(e[0] == 'release-failed' for e in db.events) == 1
+
+
+@pytest.mark.parametrize('callback', ['finish_logical_calls', 'finish_task_run', 'end_turn', 'release_conversation', 'reset_accounting_context', 'reset_conversation_context'])
+def test_primary_failure_survives_finalization_callback(monkeypatch, callback):
+    db = _DB()
+    agent = _agent_with_db(db)
+
+    def loop(*args, **kwargs):
+        raise RuntimeError('primary-loop-fault')
+
+    def fail(*args, **kwargs):
+        raise ValueError('secondary-finalization-fault')
+
+    monkeypatch.setattr('agent.conversation_loop.run_conversation', loop)
+    if callback in ('finish_logical_calls', 'end_turn', 'release_conversation'):
+        monkeypatch.setattr(relay_runtime.SESSION_COORDINATOR, callback, fail)
+    else:
+        target = {
+            'finish_task_run': 'hermes_cli.observability.relay_shared_metrics.finish_task_run',
+            'reset_accounting_context': 'agent.aux_accounting.reset_accounting_context',
+            'reset_conversation_context': 'agent.portal_tags.reset_conversation_context',
+        }[callback]
+        if callback.startswith('reset_'):
+            import importlib
+            module_name, name = target.rsplit('.', 1)
+            original = getattr(importlib.import_module(module_name), name)
+
+            def reset_then_fail(*args, **kwargs):
+                original(*args, **kwargs)
+                fail()
+
+            monkeypatch.setattr(target, reset_then_fail)
+        else:
+            monkeypatch.setattr(target, fail)
+    with pytest.raises(RuntimeError, match='primary-loop-fault'):
+        AIAgent.run_conversation(agent, 'new message', conversation_history=[])
+    assert db.events[-1][0] == 'release'
+
+
+@pytest.mark.parametrize('reset', ['reset_accounting_context', 'reset_conversation_context'])
+def test_scope_reset_fault_does_not_skip_later_teardown(monkeypatch, reset):
+    from agent import aux_accounting, portal_tags, review_idle_queue
+    db = _DB()
+    agent = _agent_with_db(db)
+    observed = []
+    monkeypatch.setattr('agent.conversation_loop.run_conversation',
+                        lambda *a, **kw: {'final_response': 'ok', 'messages': []})
+    for module, name in [(aux_accounting, 'reset_accounting_context'),
+                         (portal_tags, 'reset_conversation_context'),
+                         (portal_tags, 'reset_affinity_scope')]:
+        original = getattr(module, name)
+
+        def callback(*args, _name=name, _original=original, **kwargs):
+            observed.append(_name)
+            _original(*args, **kwargs)
+            if _name == reset:
+                raise ValueError('scope-reset-fault')
+
+        monkeypatch.setattr(module, name, callback)
+    original_finished = review_idle_queue.QUEUE.note_turn_finished
+
+    def finished():
+        observed.append('finished')
+        original_finished()
+
+    monkeypatch.setattr(review_idle_queue.QUEUE, 'note_turn_finished', finished)
+    with pytest.raises(ValueError, match='scope-reset-fault'):
+        AIAgent.run_conversation(agent, 'new message', conversation_history=[])
+    assert observed == ['reset_accounting_context', 'reset_conversation_context',
+                        'reset_affinity_scope', 'finished']
+    assert db.events[-1][0] == 'release'
+
+
 @pytest.mark.parametrize("signal", ["on_wait", "on_contended"])
 def test_run_conversation_acquires_then_reloads_latest_tip(monkeypatch, signal):
     """A lease wait and a busy-database retry both reload after admission (the busy writer may
