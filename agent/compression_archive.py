@@ -61,13 +61,15 @@ RECOVERY_MAX_ATTEMPTS = 10
 
 def _read_latest_row(db, session_id, key):
     """Newest row of THIS session carrying a typed key in display_metadata."""
-    from hermes_state_common import _sql_json_extract
     with db._read_ctx() as conn:
         return conn.execute(
             'SELECT id,display_metadata FROM messages WHERE session_id=? '
             'AND (active=1 OR compacted=1) AND display_metadata IS NOT NULL '
-            f"AND {_sql_json_extract('display_metadata', '$.' + key)} IS NOT NULL "
-            'ORDER BY id DESC LIMIT 1', (session_id,)).fetchone()
+            # json_extract conflates JSON null with missing. json_type
+            # preserves present-null as 'null', so validation can refuse it.
+            "AND json_type(CASE WHEN json_valid(display_metadata) "
+            "THEN display_metadata ELSE '{}' END, ?) IS NOT NULL "
+            'ORDER BY id DESC LIMIT 1', (session_id, '$.' + key)).fetchone()
 
 
 def _decode_meta(row):
@@ -366,9 +368,11 @@ def validate_carriers(messages):
             continue
         if not isinstance(meta, dict):
             raise ValueError('archive carrier metadata malformed')
-        reference = meta.get(CARRIER_KEY)
-        if reference is None:
+        if AVAILABILITY_KEY in meta:
+            validate_availability_status(meta[AVAILABILITY_KEY])
+        if CARRIER_KEY not in meta:
             continue
+        reference = meta[CARRIER_KEY]
         if not isinstance(reference, str):
             raise ValueError('archive receipt carrier must be text')
         validate_reference(reference)
@@ -498,6 +502,8 @@ def resolve_presentation(db, session_id, profile):
         # A newer carrier re-establishes recall over an older degraded
         # publication: a later cycle that minted successfully supersedes it.
         meta = _decode_meta(carrier_row)
+        if AVAILABILITY_KEY in meta:
+            validate_availability_status(meta[AVAILABILITY_KEY])
         if CARRIER_KEY not in meta:
             raise ValueError('archive presentation restricted: carrier metadata malformed')
         reference = meta[CARRIER_KEY]
