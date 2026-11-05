@@ -91,7 +91,7 @@ def validate_availability_status(status):
         raise ValueError('archive availability status malformed')
     if not isinstance(status['state'], str) or status['state'] != AVAILABILITY_UNAVAILABLE:
         raise ValueError('archive availability status malformed')
-    if status['reason_code'] not in AVAILABILITY_REASONS:
+    if not isinstance(status['reason_code'], str) or status['reason_code'] not in AVAILABILITY_REASONS:
         raise ValueError('archive availability reason unknown')
     return status
 
@@ -439,6 +439,7 @@ def carrier_is_unavailable(message):
     status = meta.get(AVAILABILITY_KEY)
     return (isinstance(status, dict) and set(status) == {'state', 'reason_code'}
             and status['state'] == AVAILABILITY_UNAVAILABLE
+            and isinstance(status['reason_code'], str)
             and status['reason_code'] in AVAILABILITY_REASONS)
 
 
