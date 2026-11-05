@@ -1122,6 +1122,23 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         agent.tools = [t for t in agent.tools if t["function"]["name"] not in drops]
 
     agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools} if agent.tools else set()
+    # Disclosure is presentation, not authority. Capture the same scoped catalog
+    # used by the bridge before archive resume binds its immutable capability.
+    # Keep valid_tool_names unchanged: deferred tools still dispatch via bridge.
+    archive_grants = agent.valid_tool_names & {"session_search"}
+    if not archive_grants and "tool_call" in agent.valid_tool_names:
+        try:
+            scoped = model_tools.get_tool_definitions(
+                enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
+                quiet_mode=True, skip_tool_search_assembly=True)
+            scoped = prune_oneshot_tools(scoped or [])
+            drops = agent_tool_drops(agent)
+            archive_grants = {t["function"]["name"] for t in scoped} - drops
+            archive_grants &= {"session_search"}
+        except Exception:
+            # Failure to establish scoped authority must never grant recall.
+            archive_grants = set()
+    agent._compression_archive_tool_grants = frozenset(archive_grants)
     # Kanban guidance is session-static for the dispatcher-owned worker only. Profiles may
     # expose kanban_show interactively, and children/cron runs inherit the env var, without
     # owning a task.

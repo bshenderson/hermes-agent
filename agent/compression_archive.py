@@ -246,11 +246,24 @@ class ArchiveRecall:
         result=session_search(db=self._db,current_session_id=self._session_id,session_id=self._session_id,
                               around_message_id=matches[0]['id'],window=1)
         resolve(self._db,self._session_id,self._profile,reference)
-        if len(result.encode())>MAX_RESULT_BYTES:
-            raise ValueError('archive recall result budget exceeded')
         parsed=json.loads(result)
         if not parsed.get('success'):
             raise ValueError('archive session reader refused')
+        if len(result.encode())>MAX_RESULT_BYTES:
+            # Neighboring full rows can overflow while the matching row fits.
+            # Project the real reader's complete anchor, never truncate source
+            # or imply that omitted context was returned. An oversized anchor
+            # itself still refuses under the unchanged disclosure ceiling.
+            anchors = [message for message in parsed.get('messages', [])
+                       if message.get('id') == matches[0]['id']]
+            if len(anchors) != 1:
+                raise ValueError('archive session reader anchor unavailable')
+            parsed = {'success': True, 'mode': 'archive-recall',
+                      'session_id': self._session_id, 'messages': anchors,
+                      'context_omitted': True,
+                      'hint': 'Complete matching message only; neighboring context omitted to honor result budget.'}
+            if len(_json(parsed).encode())>MAX_RESULT_BYTES:
+                raise ValueError('archive recall result budget exceeded')
         # Sanitize source-bearing response strings, preserving JSON structure.
         def sanitize(value):
             if isinstance(value,str):
@@ -706,4 +719,9 @@ def _owner_profile(db, session_id):
 
 
 def _grant_from_agent(agent):
-    return {'session_search'} if 'session_search' in (getattr(agent, 'valid_tool_names', None) or set()) else set()
+    grants = getattr(agent, '_compression_archive_tool_grants', None)
+    if grants is None:
+        # Legacy direct-only consumers have no scoped snapshot. Never infer
+        # deferred permission merely from bridge visibility or registry presence.
+        grants = getattr(agent, 'valid_tool_names', None) or set()
+    return {'session_search'} if 'session_search' in grants else set()
