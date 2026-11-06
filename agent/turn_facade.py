@@ -6,7 +6,6 @@ balanced start/finish marks. Extracted from ``run_agent.py``; every method resol
 MRO unchanged.
 """
 import logging
-import sys
 import uuid
 
 from typing import Any, Dict, Generator, List, Optional
@@ -154,6 +153,7 @@ class TurnFacadeMixin:
             # Keep the ContextVar scope local (agent tokens may be observed from another thread).
             # A host that owns this thread (Hermes Console) may cancel the turn cross-thread.
             with bind_subagent_parent(self), scoped_runtime_main({}), track_in_interrupt_scope(self):
+                primary_error = None
                 try:
                     if lease is not None:
                         lease.start()
@@ -168,11 +168,13 @@ class TurnFacadeMixin:
                         title_user_message=title_user_message,
                         prelude=prelude,
                     )
+                except BaseException as error:
+                    primary_error = error
+                    raise
                 finally:
                     # Post-loop relay/task finalization must not receive a late refresh interrupt;
                     # the interrupt clear itself waits for the thread join in the outer finally.
                     if lease is not None:
-                        primary_error = sys.exception()
                         try:
                             lease.stop_refresher()
                         except BaseException as cleanup_error:

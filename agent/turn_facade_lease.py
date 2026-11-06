@@ -107,8 +107,17 @@ class DurableTurnLease:
     def join_threads(self, timeout: float = 1.0) -> None:
         """Cancel both timers; ``wait=timeout`` mirrors the old ``thread.join(timeout)`` so an
         in-flight tick finishes before ``clear_interrupt`` runs."""
+        first_error = None
         for handle in self.timer_handles:
-            handle.cancel(wait=timeout)
+            try:
+                handle.cancel(wait=timeout)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+                else:
+                    first_error.add_note(f'Additional timer cancellation failure: {error!r}')
+        if first_error is not None:
+            raise first_error
 
     def release(self) -> None:
         """Release the row and drop the agent's holder attrs (only if they still name this lease)."""
