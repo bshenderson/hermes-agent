@@ -3971,7 +3971,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if self._compression_cancelled():
             raise AuxiliaryExplicitCancellation()
         # Reasoning-field fallback (DeepSeek/Qwen/Kimi put the summary in reasoning_content); capped.
-        content = extract_content_or_reasoning(response, max_reasoning_chars=8000)
+        from agent.response_capture import observe_sdk, extraction_observer, observe_error
+        observe_sdk(response)
+        observer = extraction_observer()
+        try:
+            content = extract_content_or_reasoning(response, max_reasoning_chars=8000,
+                **({'_observe': observer} if observer is not None else {}))
+        except BaseException as error:
+            observe_error(error)
+            raise
         where = f"(provider={self.provider or 'auto'} model={self.summary_model or self.model})"
         # Some OpenAI-compatible proxies (e.g. cmkey.cn, one-api channels) return a well-formed HTTP 200
         # with an empty or whitespace-only ``content`` instead of an error or empty ``choices``. That

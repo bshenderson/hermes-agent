@@ -7161,10 +7161,15 @@ def _create_with_progress_once(
     cancel_check = _capture_aux_cancel_check()
     if _aux_interrupt_protected() and cancel_check is not None and isinstance(client, SyncOpenAI):
         from agent.auxiliary_request import cancellable_openai_attempt
-        with cancellable_openai_attempt(
-            client, cancel_check, verify=_resolve_aux_verify(str(client.base_url))
-        ) as owned:
-            return _create_with_progress_impl(owned, kwargs, task, force_stream=force_stream)
+        from agent.response_capture import provider_scope
+        with provider_scope(task, client) as observer:
+            with cancellable_openai_attempt(
+                client, cancel_check, verify=_resolve_aux_verify(str(client.base_url)),
+                **({'observer': observer} if observer is not None else {})
+            ) as owned:
+                return _create_with_progress_impl(owned, kwargs, task, force_stream=force_stream)
+    from agent.response_capture import unsupported_transport
+    unsupported_transport(task)
     return _create_with_progress_impl(client, kwargs, task, force_stream=force_stream)
 
 
@@ -7320,6 +7325,9 @@ class _ChatStreamAccumulator:
         # CLI/gateway host has stopped even though the protected provider worker inherited the event.
         if _aux_interrupt_cancel_requested():
             raise AuxiliaryExplicitCancellation()
+        from agent.response_capture import observe_sdk
+        observe_sdk(chunk, delta=True)
+        # Observation does not advance the watchdog.
         # Every frame records transport timing (TTFP); only a substantive payload ticks the
         # forward-progress hook that keeps compression alive (and is reported as True).
         _notify_aux_timing_response()
@@ -8361,17 +8369,25 @@ def _message_field(msg, name):
     return msg.get(name) if isinstance(msg, dict) else getattr(msg, name, None)
 
 
-def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = None) -> str:
+def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = None, _observe=None) -> str:
     """Extract content from an LLM response, falling back to reasoning fields.
     Order: ``content`` (inline think blocks stripped) → ``reasoning``/``reasoning_content`` →
     ``reasoning_details`` (OpenRouter array). Accepts a response or bare message;
     ``max_reasoning_chars`` bounds a reasoning fallback so unbounded chain-of-thought can't
     become the compaction summary. Returns ``""`` if nothing found."""
+    def done(value, branch, truncated=False):
+        if _observe is not None:
+            try:
+                _observe(value, branch, truncated)
+            except Exception:
+                pass
+        return value
+
     msg = _coerce_llm_message(response)
     if msg is None:
-        return ""
+        return done('', 'empty')
     if isinstance(msg, str):
-        return msg.strip()
+        return done(msg.strip(), 'bare_message')
     raw = _message_field(msg, "content")
     if not isinstance(raw, str):
         raw = str(raw) if raw else ""
@@ -8384,7 +8400,7 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
             cleaned = pattern.sub("", cleaned)
         cleaned = cleaned.strip()
         if cleaned:
-            return cleaned
+            return done(cleaned, 'content' if cleaned == content else 'inline_think_content')
     # Content is empty or reasoning-only — try structured reasoning fields
     reasoning_parts: list[str] = []
     for field in ("reasoning", "reasoning_content"):
@@ -8399,13 +8415,13 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
                 if summary and summary not in reasoning_parts:
                     reasoning_parts.append(summary.strip() if isinstance(summary, str) else str(summary))
     if not reasoning_parts:
-        return ""
+        return done('', 'empty')
     text = "\n\n".join(reasoning_parts)
     if max_reasoning_chars is not None and len(text) > max_reasoning_chars:
         logger.warning("fell back to reasoning fields (%d chars); truncating to %d",
                        len(text), max_reasoning_chars)
-        return text[:max_reasoning_chars]
-    return text
+        return done(text[:max_reasoning_chars], 'reasoning_fallback', True)
+    return done(text, 'reasoning_fallback')
 
 
 @_relay_auxiliary_call_async

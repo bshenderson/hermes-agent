@@ -6,7 +6,7 @@ from agent.process_bootstrap import build_keepalive_http_client
 
 
 @contextmanager
-def cancellable_openai_attempt(client, cancel_check, *, verify=True):
+def cancellable_openai_attempt(client, cancel_check, *, verify=True, observer=None):
     """Keep the cached SDK client alive; abort only a fresh transport owner's I/O.
 
     Shared keepalive pools stamp each view's in-flight requests with its owner id.
@@ -38,6 +38,8 @@ def cancellable_openai_attempt(client, cancel_check, *, verify=True):
 
     try:
         http.event_hooks['request'].append(reject_cancelled_retry)
+        if observer is not None:
+            http.event_hooks['request'].append(observer)
         owned = client.with_options(http_client=http)
         if cancel_check():
             raise AuxiliaryExplicitCancellation()

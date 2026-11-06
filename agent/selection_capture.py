@@ -105,7 +105,10 @@ def _manifest(root):
     value = json.loads(raw)
     fields = {'campaign_id', 'profile', 'subject', 'chat', 'root_session_id',
               'armed_at', 'expires_at', 'synthetic_only'}
-    if not isinstance(value, dict) or set(value) != fields or value['synthetic_only'] is not True:
+    v2 = (isinstance(value, dict) and set(value) == fields | {'version', 'capture_kind'}
+          and type(value['version']) is int and value['version'] == 2
+          and value['capture_kind'] == 'response-boundary-v1')
+    if not isinstance(value, dict) or (set(value) != fields and not v2) or value['synthetic_only'] is not True:
         raise ValueError('invalid selection capture manifest')
     if not all(isinstance(value[k], str) and value[k] for k in fields - {'armed_at', 'expires_at', 'synthetic_only'}):
         raise ValueError('invalid selection capture identity')
@@ -139,7 +142,13 @@ def for_owned_request(profile, owned_history):
                 if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
                         or info.st_uid != os.getuid()):
                     raise ValueError('unsafe selection capture root')
-                _campaigns[identity] = SelectionCapture(parent / value['campaign_id'], value['expires_at'])
+                if value.get('version') == 2:
+                    from agent.response_capture import ResponseCapture
+                    _campaigns[identity] = ResponseCapture(parent / value['campaign_id'], value['expires_at'],
+                        identity={k: value[k] for k in ('profile', 'subject', 'chat', 'root_session_id')},
+                        campaign_id=value['campaign_id'])
+                else:
+                    _campaigns[identity] = SelectionCapture(parent / value['campaign_id'], value['expires_at'])
             return _campaigns[identity]
     except FileNotFoundError:
         return None
@@ -150,6 +159,14 @@ def for_owned_request(profile, owned_history):
 
 @contextmanager
 def capture_scope(capture):
+    if hasattr(capture, 'request_scope'):
+        with capture.request_scope() as request:
+            token = _current.set(request)
+            try:
+                yield
+            finally:
+                _current.reset(token)
+        return
     token = _current.set(capture)
     try:
         yield

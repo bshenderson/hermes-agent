@@ -127,9 +127,11 @@ def extract_summary(source, call, *, context_length, output_tokens, safety_token
     if available < 256:
         raise CompressionBudgetError('source quotation instructions exceed input budget')
     quotes = []
+    from agent.response_capture import selection_scope
     for chunk in _chunks(source, available):
         prompt = _prompt(chunk)
-        quotes.extend(_selection(chunk, call(prompt)))
+        with selection_scope(chunk):
+            quotes.extend(_selection(chunk, call(prompt)))
     if any(source.count(quote) != 1 for quote in quotes):
         raise CompressionBudgetError('ambiguous source excerpt across chunks')
     quotes = _merge_quotes(source, quotes)
