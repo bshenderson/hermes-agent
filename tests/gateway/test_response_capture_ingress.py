@@ -16,7 +16,7 @@ from gateway.platforms.api_server_archive_chat import owned_session_id
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('mode', ['reasoning', 'content', 'think', 'details', 'plain', 'http', 'length', 'extraction_error',
-    'invented', 'v1', 'foreign_subject', 'foreign_profile', 'foreign_chat', 'foreign_root',
+    'invented', 'long_stream', 'v1', 'foreign_subject', 'foreign_profile', 'foreign_chat', 'foreign_root',
     'unsigned', 'bad_signature', 'stale_signature', 'expired', 'unknown_version',
     'wrong_kind', 'unsafe_mode', 'missing_manifest'])
 async def test_signed_response_capture_vertical(harness, monkeypatch, mode):
@@ -52,9 +52,12 @@ async def test_signed_response_capture_vertical(harness, monkeypatch, mode):
         path.chmod(0o644)
     elif mode == 'missing_manifest':
         path.unlink()
-    selected = mode in ('reasoning', 'content', 'think', 'details', 'plain', 'invented', 'http', 'length', 'extraction_error')
+    selected = mode in ('reasoning', 'content', 'think', 'details', 'plain', 'invented', 'long_stream', 'http', 'length', 'extraction_error')
     source = 'Mira must review KESTREL; do not send.'
     answer = json.dumps({'excerpts': ['invented' if mode == 'invented' else source]})
+    if mode == 'long_stream':
+        # Valid JSON with enough wire fragments to starve the old observer.
+        answer = ' ' * 8192 + answer
     payload = dict(content=answer)
     if mode == 'reasoning':
         payload = dict(content='', reasoning_content=answer)
@@ -72,10 +75,13 @@ async def test_signed_response_capture_vertical(harness, monkeypatch, mode):
         if mode == 'plain':
             return httpx.Response(200, json=dict(id='synthetic', created=0, object='chat.completion',
                 model='fixture', choices=[dict(index=0, message={'role': 'assistant', **payload}, finish_reason='stop')]))
+        chunks = [(payload, None), ({}, 'length' if mode == 'length' else 'stop')]
+        if mode == 'long_stream':
+            chunks = [({'content': piece}, None) for piece in answer] + [({}, 'stop')]
         body = ''.join('data: ' + json.dumps(dict(id='synthetic', created=0,
             object='chat.completion.chunk', model='fixture', choices=[dict(index=0,
             delta=delta, finish_reason=finish)])) + '\n\n' for delta, finish in
-            [(payload, None), ({}, 'length' if mode == 'length' else 'stop')]) + 'data: [DONE]\n\n'
+            chunks) + 'data: [DONE]\n\n'
         return httpx.Response(200, text=body, headers={'content-type': 'text/event-stream'})
     cached_http = httpx.Client(transport=httpx.MockTransport(transport))
     client = OpenAI(api_key='fixture-key', base_url='http://offline.invalid/v1',
@@ -199,7 +205,7 @@ async def test_signed_response_capture_vertical(harness, monkeypatch, mode):
         assert len(requests) == 1
         assert requests[0]['messages'] and requests[0]['response_format'] == q.FORMAT
         assert requests[0]['chat_template_kwargs']['enable_thinking'] is False
-        files = list((root / 'selection-captures' / 'response-vertical').glob('event-*.json'))
+        files = sorted((root / 'selection-captures' / 'response-vertical').glob('event-*.json'))
         records = [json.loads(x.read_text()) for x in files]
         if not selected:
             assert not records
@@ -211,15 +217,21 @@ async def test_signed_response_capture_vertical(harness, monkeypatch, mode):
             kinds.discard('extraction')
             kinds.add('extraction_error')
         if mode != 'plain':
-            kinds.add('sdk_delta')
+            kinds.add('sdk_delta_batch')
         assert kinds <= {x['kind'] for x in records}
+        if mode == 'long_stream':
+            deltas = [d for x in records
+                      if x['kind'] == 'sdk_delta_batch' for d in x['data']['deltas']]
+            assert ''.join(d['content'] or '' for d in deltas) == answer
+            status = json.loads((files[0].parent / 'status.json').read_text())
+            assert status['omitted'] == status['errors'] == 0
         if mode == 'extraction_error':
             assert next(x for x in records if x['kind'] == 'extraction_error')['data']['error_class'] == 'ValueError'
             return
         extracted = next(x for x in records if x['kind'] == 'extraction')
         branch = 'reasoning_fallback' if mode in ('reasoning', 'details') else 'inline_think_content' if mode == 'think' else 'content'
         assert extracted['data']['branch'] == branch
-        assert extracted['data']['selected'] == answer
+        assert extracted['data']['selected'] == answer.strip()
         assert len({x['request_id'] for x in records}) == 1
         assert len({x['selection_call_id'] for x in records}) == 1
         assert all(x['identity']['chat'] == CHAT for x in records)

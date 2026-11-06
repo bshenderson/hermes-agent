@@ -8,6 +8,7 @@ from contextvars import ContextVar
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
 from typing import Any
@@ -59,6 +60,7 @@ class ResponseCapture(SelectionCapture):
         self.identity = dict(identity)
         self.campaign_id = campaign_id
         self.closed_requests = 0
+        self._lock = threading.RLock()
 
     def _status(self):
         # Bounded metadata, never model strings or exception text.
@@ -71,7 +73,15 @@ class ResponseCapture(SelectionCapture):
             stream.flush()
             os.fsync(stream.fileno())
 
-    def emit(self, request, call, attempt, kind, build):
+    def payload(self, request, call, attempt, kind, data):
+        return (json.dumps(dict(classification='private-synthetic-response-observation',
+            campaign_id=self.campaign_id, identity=self.identity, request_id=request.id,
+            selection_call_id=call.id, source=call.source,
+            provider_attempt_id=attempt.id if attempt else None,
+            transport_ordinal=attempt.ordinal if attempt else None,
+            kind=kind, data=data, authorizes_execution=False), ensure_ascii=True) + '\n').encode()
+
+    def emit(self, request, call, attempt, kind, build, *, charged=0):
         with self._lock:
             self.events += 1
             if kind == 'transport_request' and attempt is not None:
@@ -79,19 +89,16 @@ class ResponseCapture(SelectionCapture):
             try:
                 if (self.events > 128 or time.monotonic() >= self.deadline
                         or not request.active or not call.active
-                        or (attempt and not attempt.active and kind in ('transport_request', 'sdk_delta'))):
+                        or (attempt and not attempt.active and kind in ('transport_request', 'sdk_delta', 'sdk_delta_batch'))):
                     self.omitted += 1
                     return
-                payload = (json.dumps(dict(classification='private-synthetic-response-observation',
-                    campaign_id=self.campaign_id, identity=self.identity, request_id=request.id,
-                    selection_call_id=call.id, source=call.source,
-                    provider_attempt_id=attempt.id if attempt else None,
-                    transport_ordinal=attempt.ordinal if attempt else None,
-                    kind=kind, data=build(), authorizes_execution=False), ensure_ascii=True) + '\n').encode()
-                if self.bytes + len(payload) > _LIMIT:
+                payload = self.payload(request, call, attempt, kind, build())
+                if charged and len(payload) != charged:
+                    raise ValueError('delta batch reservation mismatch')
+                if self.bytes + (0 if charged else len(payload)) > _LIMIT:
                     self.omitted += 1
                     return
-                self.bytes += len(payload)  # Nonrefundable even if open/write/fsync fails.
+                self.bytes += 0 if charged else len(payload)  # Nonrefundable, including buffered deltas.
                 fd = os.open(self.root / f'event-{self.events:04d}.json',
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 with os.fdopen(fd, 'wb') as stream:
@@ -192,6 +199,11 @@ def _emit(kind, build):
 
 
 def observe_sdk(value, *, delta=False):
+    if delta:
+        attempt = _attempt.get()
+        if attempt is not None:
+            attempt.add_delta(value)
+        return
     _emit('sdk_delta' if delta else 'summary_response', lambda: _sdk(value, delta))
 
 
@@ -210,11 +222,48 @@ def extraction_observer():
 class ProviderAttempt:
     def __init__(self, call):
         self.call, self.id, self.active, self.ordinal = call, uuid.uuid4().hex, True, 0
+        self.deltas, self.delta_charge = [], 0
+
+    def flush(self):
+        c = self.call.request.campaign
+        with c._lock:
+            if self.deltas:
+                data, charge = self.deltas, self.delta_charge
+                self.deltas, self.delta_charge = [], 0
+                c.emit(self.call.request, self.call, self, 'sdk_delta_batch',
+                       lambda: {'deltas': data}, charged=charge)
+
+    def add_delta(self, value):
+        c, call = self.call.request.campaign, self.call
+        with c._lock:
+            try:
+                if (not self.active or not call.active or not call.request.active
+                        or time.monotonic() >= c.deadline or c.events >= 128):
+                    c.omitted += 1
+                    return
+                data = _sdk(value, delta=True)
+                size = len(json.dumps(data, ensure_ascii=True).encode())
+                if self.deltas and self.delta_charge + size + 2 > 16384:
+                    self.flush()
+                overhead = (2 if self.deltas else len(c.payload(
+                    call.request, call, self, 'sdk_delta_batch', {'deltas': []})))
+                # Reserve before retaining raw fields; never refund failed/expired batches.
+                if c.bytes + size + overhead > _LIMIT:
+                    c.omitted += 1
+                    return
+                c.bytes += size + overhead
+                self.delta_charge += size + overhead
+                self.deltas.append(data)
+                if len(self.deltas) >= 256 or self.delta_charge >= 16384:
+                    self.flush()
+            except Exception:
+                c.errors += 1
 
     def hook(self, base_url):
         expected = (base_url.scheme, base_url.host, base_url.port, base_url.path.rstrip('/') + '/chat/completions')
         def observe(request):
             try:
+                self.flush()  # A retry/fallback request gets its own transport ordinal.
                 def build():
                     if (request.url.scheme, request.url.host, request.url.port, request.url.path) != expected:
                         raise ValueError('unsupported observation destination')
@@ -277,6 +326,7 @@ def provider_scope(task, client):
         # Keep the attempt's identity for the summary/selection return leg, but
         # an escaped HTTP hook must not emit after this attempt has unwound.
         with call.request.campaign._lock:
+            attempt.flush()
             attempt.active = False
         _attempt.reset(token)
 
