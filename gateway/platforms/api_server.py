@@ -4275,10 +4275,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         request_profile = _api_request_profile.get()
         request_browser_control_principal = _api_request_browser_control_principal.get()
         request_browser_control_transport_family = _api_request_browser_control_transport_family.get()
+        from agent.selection_capture import capture_scope, for_owned_request
+        selection_capture = for_owned_request(request_profile, owned_chat_history)
 
         def _run():
             from gateway.session_context import clear_session_vars
-            with self._profile_scope(request_profile):
+            # Bind in the actual worker: request ContextVars do not cross the executor.
+            with self._profile_scope(request_profile), capture_scope(selection_capture):
                 tokens = self._bind_api_server_session(
                     chat_id=session_id or "", session_key=gateway_session_key or session_id or "",
                     session_id=session_id or "", profile=request_profile or "",

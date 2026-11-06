@@ -75,6 +75,8 @@ def _prompt(source):
 
 
 def _selection(source, response):
+    from agent.selection_capture import observe_selection
+    observe_selection(source, response)
     try:
         value = json.loads(response)
     except (ValueError, TypeError) as error:
