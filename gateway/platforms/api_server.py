@@ -1078,6 +1078,10 @@ PROVIDER_AUTH_FAILED_LABEL = "Provider authentication failed"
 PROVIDER_RATE_LIMITED_LABEL = "Provider rate-limited"
 
 
+class _PrecisionUnavailableError(RuntimeError):
+    """Predispatch precision refusal, distinct from provider authentication."""
+
+
 class _ProviderAuthResolutionError(RuntimeError):
     """Provider credential resolution failed. Typed so callers never mislabel other
     RuntimeErrors from run_conversation() (e.g. a closed OpenAI client) as auth failures."""
@@ -2388,7 +2392,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     'resolve': lambda provider, selected: self._resolve_provider_runtime(
                         provider, target_model=selected, required=True)}))
         except AvailabilityRefused as exc:
-            raise _ProviderAuthResolutionError(str(exc)) from exc
+            raise _PrecisionUnavailableError(str(exc)) from exc
         if precision_selection and precision_selection['runtime'] is not None:
             # Replace endpoint/credential identity as one bundle, including absent
             # fields. Never pair a cloud provider with the old local bearer.
@@ -4389,6 +4393,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         # the agent's result, transcript, failure flags and usage intact.
                         result = {**result, "_notification_presentation_suppressed": True}
                     return result, usage
+                except _PrecisionUnavailableError as exc:
+                    message = str(exc)
+                    return (
+                        {"final_response": message, "messages": [],
+                         "api_calls": 0, "tools": [], "completed": False,
+                         "failed": True, "error": message, "error_code": "precision_unavailable",
+                         **({"_notification_presentation_suppressed": True} if muted else {})},
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 except _ProviderAuthResolutionError as exc:
                     # Typed provider-auth failure only, handled once for every caller in
                     # run.py's response shape (text, no HTTP error).

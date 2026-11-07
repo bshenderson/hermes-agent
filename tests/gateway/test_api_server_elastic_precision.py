@@ -128,6 +128,84 @@ def test_both_unavailable_refuses_before_agent_or_tools(constructor):
     constructor[4].assert_not_called()
 
 
+def test_capacity_refusal_keeps_failed_outcome_through_real_executor(constructor, monkeypatch):
+    from gateway.platforms import api_server as api
+
+    adapter, _, built, probe, resolver = constructor
+    monkeypatch.setattr(adapter, '_profile_scope', lambda _: nullcontext())
+    probe.return_value = {'available': False, 'reason': 'capacity_busy'}
+    token = api._api_request_profile.set('homelab-coordinator')
+    try:
+        result, usage = asyncio.run(adapter._run_agent('capacity fixture', []))
+    finally:
+        api._api_request_profile.reset(token)
+    assert result.get('failed') is True
+    assert result.get('completed') is False
+    assert result.get('error_code') == 'precision_unavailable'
+    assert result['api_calls'] == 0 and result['tools'] == []
+    assert 'No model or tools dispatched' in result['final_response']
+    assert 'authentication' not in result['final_response'].lower()
+    assert usage['total_tokens'] == 0
+    assert built == []
+    assert probe.call_count == 3
+    resolver.assert_not_called()
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_capacity_refusal_is_failed_on_authenticated_http_ingress(constructor, monkeypatch, stream):
+    import json
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+    from gateway.platforms import api_server as api
+
+    adapter, _, built, probe, resolver = constructor
+    probe.return_value = {'available': False, 'reason': 'capacity_busy'}
+    monkeypatch.setattr(adapter, '_profile_scope', lambda _: nullcontext())
+    adapter.gateway_runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True))
+    monkeypatch.setattr('hermes_cli.profiles.profiles_to_serve', lambda **_: [('homelab-coordinator', None)])
+    monkeypatch.setattr(adapter, '_derive_browser_control_principal', lambda _: None)
+    monkeypatch.setattr(adapter, '_browser_control_transport_family', lambda _: '')
+    monkeypatch.setattr(adapter, '_expected_api_key', lambda: 'fixture-authenticated-key')
+    monkeypatch.setattr(adapter, '_activate_admitted_request', lambda: None)
+    monkeypatch.setattr(adapter, '_record_api_metrics', lambda *_: None)
+    monkeypatch.setattr(adapter, '_select_request_route', lambda *_, **__: (None, {}, None))
+    adapter._memory_sessions = MagicMock()
+
+    async def handle(request):
+        assert api._api_request_profile.get() == 'homelab-coordinator'
+        rejected = adapter._check_auth(request)
+        if rejected is not None:
+            return rejected
+        return await adapter._handle_chat_completions(request)
+
+    async def trial():
+        app = web.Application(middlewares=[adapter._make_profile_prefix_middleware()])
+        app.router.add_post('/p/{profile}/v1/chat/completions', handle)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post('/p/homelab-coordinator/v1/chat/completions',
+                headers={'Authorization': 'Bearer fixture-authenticated-key'},
+                json={'model': 'homelab-coordinator', 'stream': stream,
+                      'messages': [{'role': 'user', 'content': 'capacity fixture'}]})
+            assert response.status == 200  # Existing in-band HTTP/SSE failure contract.
+            raw = await response.text()
+            if stream:
+                chunks = [json.loads(line[6:]) for line in raw.splitlines()
+                          if line.startswith('data: ') and line != 'data: [DONE]']
+                payload = next(c for c in chunks if c.get('hermes', {}).get('failed'))
+                assert 'data: [DONE]' in raw
+            else:
+                payload = json.loads(raw)
+                assert response.headers['X-Hermes-Completed'] == 'false'
+            assert payload['choices'][0]['finish_reason'] == 'error'
+            assert payload['hermes']['failed'] is True
+            assert payload['hermes']['completed'] is False
+            assert 'authentication failed' not in raw.lower()
+
+    asyncio.run(trial())
+    assert built == [] and probe.call_count == 3
+    resolver.assert_not_called()
+
+
 def test_substantial_is_explicit_producer_intent_not_prompt_guessing(constructor):
     constructor[1]['api_server']['precision_intent'] = 'substantial'
     assert create(constructor).model == SPARKY
