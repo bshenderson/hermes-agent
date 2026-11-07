@@ -236,8 +236,13 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 10.0
 API_SERVER_HEARTBEAT_SECONDS = 30.0
 API_SERVER_LATENCY_SAMPLE_LIMIT = 512
-MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
-MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+# GXTD-803 input preservation: submitted text is preserved complete within the authenticated
+# request-byte bound (``MAX_REQUEST_BYTES``, enforced by ``body_limit_middleware`` +
+# ``client_max_size``). A single text field may never exceed that same bound — an input that
+# somehow does is refused with a typed ``input_too_large`` error, never silently sliced.
+# (The former silent 65_536-char slice lost the tail of long submissions: #gxtd803 ingress defect.)
+MAX_INPUT_TEXT_LENGTH = MAX_REQUEST_BYTES  # one text field cannot exceed one request
+MAX_CONTENT_LIST_SIZE = 1_000  # max items when content is an array; exceeded -> explicit refusal
 RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT = 100
 
 
@@ -418,25 +423,41 @@ def _auto_truncate_response_history(
     return [conversation_history[index] for index in sorted(kept_indices)]
 
 
-def _cap_text(text: str) -> str:
-    return text[:MAX_NORMALIZED_TEXT_LENGTH] if len(text) > MAX_NORMALIZED_TEXT_LENGTH else text
+def _validated_text(text: str) -> str:
+    """Return ``text`` unchanged. Raises a typed ``input_too_large`` refusal when a single
+    text field exceeds ``MAX_INPUT_TEXT_LENGTH`` — input is never silently truncated
+    (GXTD-803: the 65_536 silent slice lost the final instruction of a long submission)."""
+    if len(text) > MAX_INPUT_TEXT_LENGTH:
+        raise ValueError(
+            f"input_too_large:Text content of {len(text)} characters exceeds the maximum "
+            f"input size of {MAX_INPUT_TEXT_LENGTH} characters. Complete input is preserved; "
+            "oversized input is refused rather than truncated.")
+    return text
 
 
-def _cap_list(items: list) -> list:
-    return items[:MAX_CONTENT_LIST_SIZE] if len(items) > MAX_CONTENT_LIST_SIZE else items
+def _validated_list(items: list) -> list:
+    """Return ``items`` unchanged, or refuse explicitly when the content-part array exceeds
+    ``MAX_CONTENT_LIST_SIZE`` (no silent item drop)."""
+    if len(items) > MAX_CONTENT_LIST_SIZE:
+        raise ValueError(
+            f"input_too_large:Content array of {len(items)} items exceeds the maximum of "
+            f"{MAX_CONTENT_LIST_SIZE} items. Complete input is preserved; oversized input is "
+            "refused rather than truncated.")
+    return items
 
 
 def _normalize_chat_content(content: Any, *, _max_depth: int = 10, _depth: int = 0) -> str:
     """Flatten OpenAI chat content (string or typed-part array) into one plain string; non-text
-    parts are skipped, recursion depth / list size / output length are bounded."""
+    parts are skipped. Recursion depth is bounded; list size and per-text length are refused
+    explicitly (typed ``input_too_large``) rather than silently capped — complete input
+    within the request-byte bound is preserved (GXTD-803)."""
     if _depth > _max_depth or content is None:
         return ""
     if isinstance(content, str):
-        return _cap_text(content)
+        return _validated_text(content)
     if isinstance(content, list):
         parts: list[str] = []
-        total_len = 0
-        for item in _cap_list(content):
+        for item in _validated_list(content):
             part = ""
             if isinstance(item, str):
                 part = item
@@ -449,16 +470,14 @@ def _normalize_chat_content(content: Any, *, _max_depth: int = 10, _depth: int =
             elif isinstance(item, list):
                 part = _normalize_chat_content(item, _max_depth=_max_depth, _depth=_depth + 1)
             if part:
-                part = _cap_text(part)
+                part = _validated_text(part)
                 parts.append(part)
-                total_len += len(part)
-            if total_len >= MAX_NORMALIZED_TEXT_LENGTH:
-                break
-        return _cap_text("\n".join(parts))
+        return "\n".join(parts)
     try:
-        return _cap_text(str(content))
+        text = str(content)
     except Exception:
         return ""
+    return _validated_text(text)
 
 
 # Chat Completions / Responses part-type spellings; emitted shape is always the canonical
@@ -503,19 +522,20 @@ def _normalize_multimodal_content(content: Any) -> Any:
     ``image_url`` parts (native OpenAI vision shape; Anthropic conversion happens downstream).
 
     Raises ``ValueError("<code>:<message>")`` with codes ``unsupported_content_type`` (file
-    parts, non-image data URLs, unknown types), ``invalid_image_url``, ``invalid_content_part``.
+    parts, non-image data URLs, unknown types), ``invalid_image_url``, ``invalid_content_part``,
+    and ``input_too_large`` (GXTD-803: oversized input is refused explicitly, never sliced).
     """
     if content is None:
         return ""
     if isinstance(content, str):
-        return _cap_text(content)
+        return _validated_text(content)
     if not isinstance(content, list):
         return _normalize_chat_content(content)
     normalized_parts: list[dict[str, Any]] = []
-    for part in _cap_list(content):
+    for part in _validated_list(content):
         if isinstance(part, str):
             if part:
-                normalized_parts.append({"type": "text", "text": _cap_text(part)})
+                normalized_parts.append({"type": "text", "text": _validated_text(part)})
             continue
         if not isinstance(part, dict):
             continue  # unknown scalars are ignored for forward compatibility (e.g. ``refusal``)
@@ -524,7 +544,7 @@ def _normalize_multimodal_content(content: Any) -> Any:
         if part_type in _TEXT_PART_TYPES:
             text = part.get("text")
             if text is not None and str(text):
-                normalized_parts.append({"type": "text", "text": _cap_text(str(text))})
+                normalized_parts.append({"type": "text", "text": _validated_text(str(text))})
         elif part_type in _IMAGE_PART_TYPES:
             normalized_parts.append(_normalize_image_part(part))
         elif part_type in _FILE_PART_TYPES:

@@ -1185,7 +1185,12 @@ async def _handle_steer_run(self, request: web.Request, *, _api_server) -> web.R
     if err:
         return err
     raw_text = body.get("input") or body.get("message") or body.get("text") or ""
-    steer_text = _api_server._normalize_chat_content(raw_text).strip()
+    try:
+        # GXTD-803: oversized steer text earns a typed refusal, never a silent slice.
+        steer_text = _api_server._normalize_chat_content(raw_text).strip()
+    except ValueError as exc:
+        return _json_error(
+            _openai_error, str(exc), code="input_too_large", status=400)
     if not steer_text:
         return _json_error(
             _openai_error, "Missing non-empty steer text; expected 'input', 'message', or 'text'.",
