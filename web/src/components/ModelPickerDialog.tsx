@@ -228,7 +228,7 @@ export function ModelPickerDialog(props: Props) {
     const ranked = fuzzyRank(
       providers,
       trimmedQuery,
-      (p) => `${p.name} ${p.slug} ${(p.models ?? []).join(" ")}`,
+      (p) => `${p.name} ${p.slug} ${(p.models ?? []).join(" ")} ${Object.values(p.model_labels ?? {}).join(" ")}`,
     ).map((r) => r.item);
     if (trimmedQuery) return ranked;
     const withModels = ranked.filter((p) => (p.models ?? []).length > 0);
@@ -243,7 +243,7 @@ export function ModelPickerDialog(props: Props) {
   // model ids contain "aws"). Fall back to an unfiltered model list in that
   // case; a query that also matches a model id keeps filtering normally.
   const queryMatchesSelectedProviderOnly = useMemo(
-    () => queryMatchesProviderOnly(selectedProvider, models, trimmedQuery),
+    () => queryMatchesProviderOnly(selectedProvider, models.map((m) => `${m} ${selectedProvider?.model_labels?.[m] ?? ""}`), trimmedQuery),
     [trimmedQuery, selectedProvider, models],
   );
 
@@ -255,13 +255,13 @@ export function ModelPickerDialog(props: Props) {
       fuzzyRank(
         models,
         queryMatchesSelectedProviderOnly ? "" : trimmedQuery,
-        modelSearchText,
+        (m) => `${selectedProvider?.model_labels?.[m] || m} ${modelSearchText(m)}`,
       ).map((r) => ({
         model: r.item,
-        // Positions may land in alias suffixes — keep only in-id highlights.
-        positions: r.positions.filter((i) => i >= 0 && i < r.item.length),
+        // Only highlight the displayed label, not wire-id/alias suffixes.
+        positions: r.positions.filter((i) => i >= 0 && i < (selectedProvider?.model_labels?.[r.item] || r.item).length),
       })),
-    [models, trimmedQuery, queryMatchesSelectedProviderOnly],
+    [models, trimmedQuery, queryMatchesSelectedProviderOnly, selectedProvider],
   );
 
   const canConfirm = !!selectedProvider && !!selectedModel && !applying;
@@ -381,7 +381,7 @@ export function ModelPickerDialog(props: Props) {
             {formatPickerCurrentLabel({
               model: currentModel,
               provider: currentProviderSlug,
-            })}
+            }, providers)}
           </p>
         </header>
 
@@ -652,7 +652,7 @@ function ModelColumn({
                 className={`h-3 w-3 shrink-0 ${active ? "text-primary" : "text-transparent"}`}
               />
               <span className="flex-1 truncate">
-                <HighlightedText text={m} positions={positions} />
+                <HighlightedText text={provider.model_labels?.[m] || m} positions={positions} />
               </span>
               {isCurrent && <CurrentTag />}
             </ListItem>
