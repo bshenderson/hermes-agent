@@ -353,6 +353,21 @@ class OnePasswordSource(SecretSource):
             "override_existing": {"description": "Resolved values overwrite .env/shell values", "default": True},
         }
 
+    def narrow_config(self, cfg: dict, only_names: frozenset[str]) -> Optional[dict]:
+        """GXTD-819: keep only the declared ``env:`` bindings, so a scoped fire fetches only
+        its own refs (dedup batching still applies across the declared refs). None — skip the
+        source — when nothing it maps is declared. Non-str/blank entries are dropped, matching
+        ``_validate_references`` rather than re-validating here."""
+        cfg = cfg if isinstance(cfg, dict) else {}
+        env_map = cfg.get("env")
+        kept = {name: ref for name, ref in (env_map or {}).items()
+                if isinstance(name, str) and name in only_names and isinstance(ref, str) and ref.strip()}
+        if not kept:
+            return None
+        narrowed = dict(cfg)
+        narrowed["env"] = kept
+        return narrowed
+
     def fetch(self, cfg: dict, home_path: Path) -> FetchResult:
         cfg = cfg if isinstance(cfg, dict) else {}
         result = FetchResult()

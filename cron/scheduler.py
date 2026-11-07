@@ -511,7 +511,8 @@ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | No
 
 
 from cron.jobs import (
-    _ensure_cron_dir, advance_next_runs, claim_dispatch, claim_job_for_fire, fire_claim_fence,
+    _ensure_cron_dir, MalformedSecretScopeError, advance_next_runs, claim_dispatch,
+    claim_job_for_fire, fire_claim_fence,
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
     save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
 from cron import store_health
@@ -1524,8 +1525,14 @@ def _run_no_agent_job(
     # reload never runs for no_agent jobs. Does not override existing values.
     try:
         from hermes_cli.env_loader import load_hermes_dotenv
+        from cron.jobs import resolve_job_secret_scope
 
-        load_hermes_dotenv(hermes_home=_get_hermes_home())
+        if isinstance(resolve_job_secret_scope(job), frozenset):
+            # The fire already resolved its declared external inputs privately.
+            # Dotenv refresh must not undo that bound with a whole-profile pull.
+            load_hermes_dotenv(hermes_home=_get_hermes_home(), load_external_secrets=False)
+        else:
+            load_hermes_dotenv(hermes_home=_get_hermes_home())
     except Exception:
         logger.debug("Job '%s': no_agent .env reload failed", job_id, exc_info=True)
 
@@ -2815,6 +2822,11 @@ def run_one_job(
                 # row, no ping — while executions.db keeps piling up failed rows.
                 if not post_handoff:
                     # Returns before _run_one_job_body / record_unknown_worker_outcome install the scope; get_secret fails closed without one under multiplex.
+                    # Deliberately UNSCOPED even for a secret_env job (GXTD-819): this is the
+                    # delivery lane for a dispatch that never ran user code, where today's
+                    # full-profile hydration is the only thing that guarantees the operator
+                    # actually gets the ping; a scoped refusal here would raise INSIDE the
+                    # handoff-failure handler and mask the original dispatch error.
                     with _fire_secret_scope():
                         delivery_error, delivery_outcome = _deliver_crash_failure(
                             job, error, adapters=adapters, loop=loop)
@@ -3243,7 +3255,73 @@ def _deliver_crash_failure(
 
 
 
-def _install_fire_secret_scope() -> tuple[contextvars.Token, Optional[contextvars.Token]]:
+def _scoped_fire_supply(home: Path, job: dict, scope: frozenset[str]) -> dict:
+    """Resolve a GXTD-819 per-job scope against the profile's configured sources.
+
+    One private pass is BOTH the fail-closed supply check and the fire's hydration: every
+    declared name must resolve now, since it could never resolve under a full pull either.
+    Legitimate non-source supplies (the profile's own ``.env``, a deployment-injected process
+    env name) are exempt from the refusal — both reach consumers through paths the scope build
+    or ``get_secret``'s documented fallback already honors. Raises ``_ScopedSecretRefusal``
+    (names only, never values) for anything nothing can supply.
+    """
+    if not scope:
+        # "No external hydration for this fire" — the empty scope is itself a valid answer.
+        return {}
+    from agent.secret_scope import load_env_file
+    from cron.scheduler_provider import routed_profile_fire
+    from hermes_cli.env_loader import resolve_profile_secret_names
+
+    resolved = resolve_profile_secret_names(home, sorted(scope))
+    dotenv_names = set(load_env_file(home / ".env"))
+    # Deployment-injected names (systemd EnvironmentFile=, launcher) are the documented
+    # single-profile supply get_secret resolves via its os.environ fallback — legitimate to
+    # declare ONLY when this fire actually has that fallback. A routed fire resolves through
+    # the scope and fails closed on a miss, so os.environ proves nothing for it.
+    process_env_exempt = frozenset() if routed_profile_fire() else frozenset(os.environ)
+    missing = sorted(name for name in scope
+                     if name not in resolved and name not in dotenv_names
+                     and name not in process_env_exempt)
+    if missing:
+        raise _ScopedSecretRefusal(job, missing)
+    return resolved
+
+
+def _is_secret_scope_refusal(exc: BaseException) -> bool:
+    """True for the two configuration-defect classes this feature refuses fires on.
+
+    Classified by EXACT class NAME, not identity: sibling cron tests importlib.reload
+    cron.jobs/cron.scheduler, which rebinds a cross-module ``from cron.jobs import`` name to a
+    stale class object and would otherwise let a malformed record fall through to the generic
+    crash path. The two names are unique in the codebase, and callers pair this with
+    ``except ValueError`` + re-raise so no other ValueError is ever swallowed.
+    """
+    return type(exc).__name__ in {"MalformedSecretScopeError", "_ScopedSecretRefusal"}
+
+
+def _job_secret_hydration(home: Path, job: Optional[dict]) -> Optional[dict]:
+    """Resolve the fire's external-secret inputs. Returns the private extra-external overlay
+    for ``build_profile_secret_scope`` when the job authored a scope (possibly ``{}`` = none),
+    or ``None`` for the legacy unscoped path — whose FULL hydration has ALREADY RUN here.
+
+    Shared by the in-process fire scope install and the external worker payload so both
+    fire paths scope identically (GXTD-819).
+
+    Raises: ``MalformedSecretScopeError`` (bad record) or ``_ScopedSecretRefusal`` (unsatisfiable
+    declaration) — the two configuration defects the preflight classifies; anything else keeps
+    the pre-feature crash path."""
+    from cron.jobs import resolve_job_secret_scope
+    from hermes_cli.env_loader import hydrate_profile_secret_sources
+
+    scope = resolve_job_secret_scope(job or {})
+    if isinstance(scope, frozenset):
+        return _scoped_fire_supply(home, job or {}, scope)
+    hydrate_profile_secret_sources(home)
+    return None
+
+
+def _install_fire_secret_scope(job: Optional[dict] = None
+                               ) -> tuple[contextvars.Token, Optional[contextvars.Token]]:
     """Install the firing profile's secret scope for the span ``_run_one_job_body`` runs, delivery
     included, and return the tokens ``_reset_fire_secret_scope`` needs.
 
@@ -3257,17 +3335,35 @@ def _install_fire_secret_scope() -> tuple[contextvars.Token, Optional[contextvar
     that is not a multiplexer, so nothing else isolates that fire; and switching the context on
     here rather than at the tick means no read is ever fail-closed without a scope to read — the
     restart-safe handoff in ``run_one_job`` runs before this and keeps today's semantics (#107692).
+
+    GXTD-819 per-job scoping (``job["secret_env"]``, opt-in; absent = today's full hydration):
+    see ``_job_secret_hydration`` / ``_scoped_fire_supply``. A scoped resolve is PRIVATE — it
+    writes no ``_APPLIED_HOMES`` / per-home cache, so no scoped fire can strand or poison the
+    whole-profile mapping a sibling or a later unscoped fire reads.
     """
     from agent.secret_scope import (
         build_profile_secret_scope, set_multiplex_context, set_secret_scope)
     from cron.scheduler_provider import routed_profile_fire
-    from hermes_cli.env_loader import hydrate_profile_secret_sources
 
     home = Path(_get_hermes_home())
-    hydrate_profile_secret_sources(home)
-    scope_token = set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+    external_values = _job_secret_hydration(home, job)
+    scope_mapping = build_profile_secret_scope(home, extra_external=external_values)
+    scope_token = set_secret_scope(scope_mapping, profile_home=str(home))
     context_token = set_multiplex_context(True) if routed_profile_fire() else None
     return scope_token, context_token
+
+
+class _ScopedSecretRefusal(ValueError):
+    """A GXTD-819 scoped fire declared a name no configured source or ``.env`` supplies.
+
+    Carries only NAMES (never values) — safe for job records, logs, and failure copy."""
+
+    def __init__(self, job: Optional[dict], missing: list[str]):
+        self.job_id = (job or {}).get("id")
+        self.missing = list(missing)
+        super().__init__(
+            "secret_env declares no supply for: " + ", ".join(missing)
+            + " — remove the name or bind it in the profile's secrets config / .env.")
 
 
 def _reset_fire_secret_scope(tokens: tuple[contextvars.Token, Optional[contextvars.Token]]) -> None:
@@ -3282,9 +3378,9 @@ def _reset_fire_secret_scope(tokens: tuple[contextvars.Token, Optional[contextva
 
 
 @contextlib.contextmanager
-def _fire_secret_scope():
+def _fire_secret_scope(job: Optional[dict] = None):
     """``_install_fire_secret_scope`` for the ``with`` block, reset on the way out."""
-    tokens = _install_fire_secret_scope()
+    tokens = _install_fire_secret_scope(job)
     try:
         yield
     finally:
@@ -3327,7 +3423,36 @@ def _run_one_job_body(
         # resolve credentials, so the scope must span delivery too (reset in the outer finally) —
         # including the crash notice in the except below when claim_dispatch or
         # mark_execution_running raises, so install it before either.
-        _fire_scope_tokens = _install_fire_secret_scope()
+        try:
+            _fire_scope_tokens = _install_fire_secret_scope(job)
+        except ValueError as scope_error:
+            if not _is_secret_scope_refusal(scope_error):
+                raise
+            # GXTD-819 fail-closed preflight: the job record is malformed (non-list/non-str
+            # secret_env) or declares a name NOTHING can supply — other ValueErrors re-raise
+            # above, so the generic crash path never sees them. Nothing has run — no
+            # claim_dispatch, no identity binding, no user code, no outward delivery (a
+            # configuration defect surfaces via last_error, never as a half-run). Record and
+            # close the ledger row; the outer finally finds no tokens to reset.
+            _err_text = str(scope_error) or type(scope_error).__name__
+            logger.error(
+                "Job %s refused before any side effect: %s", job["id"], _err_text)
+            try:
+                if not self_removal_delivery_allowed(job["id"]):
+                    mark_kwargs = {}
+                    if fire_owner is not None:
+                        mark_kwargs["expected_fire_owner"] = fire_owner
+                    mark_job_run(job["id"], False, _err_text, **mark_kwargs)
+            except Exception as record_err:
+                logger.error("Failed to record refused run for job %s: %s",
+                             job["id"], record_err)
+            try:
+                finish_execution(execution_id, success=False, error=_err_text,
+                                 delivery_outcome="suppressed")
+            except Exception as record_err:
+                logger.error("Failed to finish refused execution for job %s: %s",
+                             job["id"], record_err)
+            return False
         # Commit a finite one-shot's dispatch BEFORE its side effect so a tick dying mid-run cannot
         # re-fire it forever on restart. No-op for recurring/infinite jobs (at-most-times).
         # This lives here in the shared body so BOTH the built-in ticker and the external provider (Chronos
@@ -3713,7 +3838,11 @@ def _launch_external_cron_worker(job: dict) -> bool:
     profile_home = _get_hermes_home().resolve()
     # Same hydrate -> scope -> (routed) multiplex-context install the in-process fire uses, for exactly
     # the env build; the helper's reset order keeps the context from outliving its scope.
-    with _fire_secret_scope():
+    # GXTD-819: pass the job so a scoped fire never pays the parent's FULL hydration just to
+    # build this child's env (a scoped resolve writes nothing the child inherits anyway — the
+    # worker re-resolves its own scope in its own process). A refusal surfaces as an ordinary
+    # dispatch failure in run_one_job's handoff handler: fail-closed before the child spawns.
+    with _fire_secret_scope(job):
         # No restore_managed_env here: the worker re-runs load_hermes_dotenv -> _apply_managed_env at
         # import, and strip_launch_profile_env leaves managed keys in place.
         worker_env = strip_launch_profile_env(build_subprocess_env(
@@ -3893,7 +4022,6 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
         set_secret_scope,
     )
     from cron.executions import adopt_claimed_execution
-    from hermes_cli.env_loader import hydrate_profile_secret_sources
     from hermes_constants import (
         reset_hermes_home_override,
         set_hermes_home_override,
@@ -3912,8 +4040,28 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
         from hermes_cli.plugins import discover_plugins
 
         discover_plugins()
-        hydrate_profile_secret_sources(profile_home)
-        secret_token = set_secret_scope(build_profile_secret_scope(profile_home), profile_home=str(profile_home))
+        # GXTD-819: honor the job's per-fire scope here too — an authored secret_env fires
+        # resolve ONLY their declared names (never the profile's full mapping), through the same
+        # private no-cache path as the in-process fire. A refusal (declared name no source
+        # supplies, or a malformed record) does NOT kill the worker: the payload was already
+        # consumed and the parent waiter would only report an unacknowledged death. Degrade to
+        # a scope without external values and let run_one_job's body preflight — the shared
+        # fail-closed point on BOTH fire paths — record the refusal through the ordinary
+        # mark_job_run/finish_execution lane after the ack.
+        try:
+            external_values = _job_secret_hydration(profile_home, job)
+        except (MalformedSecretScopeError, _ScopedSecretRefusal) as scope_error:
+            # Scope the worker with NO external values either way (refusal or malformed
+            # record): hydration never ran, and the body's preflight — the shared
+            # fail-closed point — re-resolves, records the refusal, and fails the run
+            # through the ordinary ledger lanes.
+            logger.error(
+                "Cron external worker deferring secret_env refusal for job %s to the "
+                "run body: %s", job.get("id"), scope_error)
+            external_values = {}
+        secret_token = set_secret_scope(
+            build_profile_secret_scope(profile_home, extra_external=external_values),
+            profile_home=str(profile_home))
         # This process never ran gateway startup, so the OWNING profile's ``hooks:`` block (shell
         # hooks + ``hooks.outbound``) was never registered and cron sessions silently lost it
         # (#131764). Same helper the gateway uses per profile; it must run inside the secret scope
