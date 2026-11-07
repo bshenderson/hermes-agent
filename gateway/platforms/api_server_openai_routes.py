@@ -715,7 +715,12 @@ class OpenAICompatRoutesMixin:
             role = msg.get("role", "")
             raw_content = msg.get("content", "")
             if role == "system":
-                content = _normalize_chat_content(raw_content)
+                try:
+                    content = _normalize_chat_content(raw_content)
+                except ValueError as exc:
+                    # GXTD-803: oversized input earns the same typed 400 as user content;
+                    # it is never silently sliced.
+                    return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
                 system_prompt = content if system_prompt is None else system_prompt + "\n" + content
             elif role in {"user", "assistant"}:
                 try:

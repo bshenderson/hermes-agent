@@ -387,10 +387,18 @@ def load_env_file(env_path: Path) -> dict[str, str]:
     return secrets
 
 
-def build_profile_secret_scope(hermes_home: Path) -> dict[str, str]:
+def build_profile_secret_scope(
+    hermes_home: Path, *, extra_external: Optional[Mapping[str, str]] = None,
+) -> dict[str, str]:
     """Build a profile's secret mapping from ``<home>/.env`` plus its external
     secret sources. Global vars are NOT copied in — ``get_secret`` reads those
-    from ``os.environ`` — so the scope holds only profile secrets."""
+    from ``os.environ`` — so the scope holds only profile secrets.
+
+    ``extra_external`` (GXTD-819) layers a PRIVATE per-fire hydration snapshot (a scoped
+    ``hydrate_profile_secret_sources`` return) over the per-home cache BEFORE the managed
+    overlay, so a fire whose hydration was scoped still sees exactly the names it declared
+    resolved — without any of them entering the process-wide snapshot a sibling would read.
+    """
     secrets = load_env_file(Path(hermes_home) / ".env")
     try:
         from hermes_cli.env_loader import get_secret_source_values
@@ -398,6 +406,10 @@ def build_profile_secret_scope(hermes_home: Path) -> dict[str, str]:
     except Exception:
         external_secrets = {}
     secrets.update((k, v) for k, v in external_secrets.items() if not _is_global_env(k))
+    if extra_external:
+        # Applied LAST among external sources: the scoped resolve just ran against current
+        # config, so it is fresher than a snapshot cached earlier in this process.
+        secrets.update((k, v) for k, v in extra_external.items() if not _is_global_env(k))
     # The DEFAULT profile's config.yaml allow_all_users grant lives only in os.environ (bridged by
     # gateway.config_loader); scoped gate readers under multiplex never fall to os.environ, so seed it
     # into that profile's own mapping. A secondary never inherits it (#80099 class).

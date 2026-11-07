@@ -10,6 +10,10 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional, Sequence
+
+if TYPE_CHECKING:  # imported for annotations only: registry pulls third-party deps
+    from agent.secret_sources.registry import ApplyReport
 
 # Kept at module level on purpose: importing this module must fail when the dotenv install is
 # wiped (#57828) so early recovery provably runs before third-party imports (test_early_recovery).
@@ -168,28 +172,58 @@ def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, 
     """Resolve one profile's configured sources without mutating ``os.environ``: multiplex gateways route
     turns to profiles that never ran the process-global dotenv path, so resolve against a private mapping
     seeded from that ``.env`` and record the per-home snapshot for ``build_profile_secret_scope()``.
-    Fail-open / once-per-home like ``_apply_external_secret_sources``; never returns plaintext .env entries."""
+    Fail-open / once-per-home like ``_apply_external_secret_sources``; never returns plaintext .env entries.
+
+    GXTD-819 per-fire SCOPED hydration is the separate, strict ``resolve_profile_secret_names`` —
+    deliberately not a flag here: the scoped path must never consult or write this function's
+    caches, and one entry point per posture keeps that boundary impossible to blur by accident."""
     with _SECRET_SOURCE_CACHE_LOCK:
         return _hydrate_profile_secret_sources(Path(hermes_home))
 
 
-def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
-    """Locked implementation for :func:`hydrate_profile_secret_sources`."""
-    home_key = str(home.resolve())
-    if home_key in _APPLIED_HOMES:
-        return get_secret_source_values(home)
+def resolve_profile_secret_names(
+    hermes_home: str | os.PathLike, names: Sequence[str]
+) -> dict[str, str]:
+    """GXTD-819 per-job hydration: resolve ONLY ``names`` against the profile's configured
+    sources, STRICTLY and freshly — no caching and no cache writes at all (never
+    ``_APPLIED_HOMES``, never the per-home snapshots, never ``_SECRET_SOURCES`` /
+    ``_SOURCE_SUPPLIED_NAMES``). Returns the subset of ``names`` a source actually supplies
+    (``{name: value}``); a name absent here has no external supply.
 
-    # A retry must not keep serving a partial result after the source is removed, disabled, or can no
-    # longer be evaluated. Publish only the snapshot established by this attempt.
-    _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
-    _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
+    Unlike ``hydrate_profile_secret_sources`` this never trusts a snapshot cached earlier in
+    the process: every scoped fire re-validates against CURRENT config, so a source stopped
+    supplying a name means the declaring fire fails closed rather than running on a stale
+    value. Mapped sources narrow their own fetch (unrelated refs are never requested); bulk
+    sources fetch as a unit and are trimmed at apply time. The scoped resolve reads only
+    config/``.env``/global process env and writes NO module state, so it never contends with
+    the unscoped cache lock's publications and cannot interleave a partial result into them."""
+    requested = frozenset(str(name) for name in names)
+    if not requested:
+        return {}
+    report, local_env = _resolve_profile_secret_env(Path(hermes_home), requested)
+    if report is None or local_env is None:
+        return {}
+    return _applied_values(report, local_env)
 
+
+def _resolve_profile_secret_env(
+    home: Path, only_names: Optional[frozenset[str]] = None,
+) -> tuple[Optional[ApplyReport], Optional[dict[str, str]]]:
+    """One private resolve against a seeded mapping (never ``os.environ``); returns
+    ``(ApplyReport|None, local_env|None)`` — None/None on any config/fetch guard trip.
+
+    ``only_names=None`` resolves the full configured mapping (unchanged legacy internals); a
+    frozenset narrows every source per GXTD-819 and gates the apply phase. Callers do their own
+    bookkeeping: the unscoped publisher keeps ``_APPLIED_HOMES`` / ``_SECRET_SOURCES`` /
+    ``_record_supplied_names`` exactly as before, scoped callers read values only and write no
+    cache.
+    """
     try:
         cfg = _load_secrets_config(home)
     except Exception:
-        return {}
+        return None, None
     if not cfg:
-        return {}
+        return None, None
 
     try:
         from agent.secret_scope import _is_global_env, load_env_file
@@ -206,10 +240,43 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
             for _name, _value in load_env_file(op_env).items():
                 local_env.setdefault(_name, _value)
         local_env["HERMES_HOME"] = str(home)
-        report = apply_all(cfg, home, environ=local_env)
+        if only_names is None:
+            # Unscoped callers keep the EXACT legacy call shape — a positional/kwarg-compatible
+            # old signature (test doubles, third-party callers) stays valid for the
+            # full-hydration path; only scoped passes learn the new keyword.
+            report = apply_all(cfg, home, environ=local_env)
+        else:
+            report = apply_all(cfg, home, environ=local_env, only_names=only_names)
     except Exception:
-        return {}
+        return None, None
+    return report, local_env
 
+
+def _applied_values(report, local_env: dict[str, str]) -> dict[str, str]:
+    """``{name: value}`` for every name the report actually applied into ``local_env``."""
+    values: dict[str, str] = {}
+    for name in report.provenance:
+        value = local_env.get(name)
+        if value is None:
+            continue
+        values[name] = value
+    return values
+
+
+def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
+    """Locked implementation for :func:`hydrate_profile_secret_sources`."""
+    home_key = str(home.resolve())
+    if home_key in _APPLIED_HOMES:
+        return get_secret_source_values(home)
+
+    # A retry must not keep serving a partial result after the source is removed, disabled, or can no
+    # longer be evaluated. Publish only the snapshot established by this attempt.
+    _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
+    _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
+
+    report, local_env = _resolve_profile_secret_env(home)
+    if report is None or local_env is None:
+        return {}
     if not report.sources:
         return {}
 
@@ -222,13 +289,10 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
     # or skipped because the private mapping already had it — is a source-owned name the routed-child scrub
     # must know about, or a sibling still inherits the launch value for it (review on f5f88d5058).
     _record_supplied_names(report)
-    values: dict[str, str] = {}
+    values = _applied_values(report, local_env)
     for name, applied in report.provenance.items():
-        value = local_env.get(name)
-        if value is None:
-            continue
-        _SECRET_SOURCES[name] = applied.source
-        values[name] = value
+        if name in values:
+            _SECRET_SOURCES[name] = applied.source
     _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
     return dict(values)
 

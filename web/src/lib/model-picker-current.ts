@@ -49,11 +49,15 @@ export function resolvePickerCurrent(
   };
 }
 
-export function formatPickerCurrentLabel(current: PickerCurrent): string {
+export function formatPickerCurrentLabel(
+  current: PickerCurrent,
+  providers: readonly { slug: string; name?: string; model_labels?: Record<string, string> | null }[] = [],
+): string {
   if (isAutoPickerCurrent(current)) {
     return "auto (use main model)";
   }
-  const model = current.model.trim() || "(unknown)";
+  const row = providers.find((p) => p.slug === current.provider);
+  const model = row?.model_labels?.[current.model] || current.model.trim() || "(unknown)";
   const provider = current.provider.trim();
   return provider ? `${model} · ${provider}` : model;
 }

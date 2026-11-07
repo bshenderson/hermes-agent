@@ -162,6 +162,16 @@ class SecretSource(ABC):
         """Resolve this source's secrets. MUST NOT raise or prompt; ``cfg`` is the
         raw ``secrets.<name>`` section and may be malformed."""
 
+    def narrow_config(self, cfg: dict, only_names: frozenset[str]) -> Optional[dict]:
+        """Config for a GXTD-819 scoped pass, or None to SKIP this source entirely.
+
+        Additive optional hook (default: unchanged cfg — a source that cannot narrow still
+        fetches whole and is trimmed at apply time). Only sources whose config maps individual
+        env-var names to references can cut their own work; narrowing to an empty map returns
+        None so a scoped fire that declares nothing from this source never invokes it.
+        """
+        return cfg
+
     def is_enabled(self, cfg: dict) -> bool:
         return bool(isinstance(cfg, dict) and cfg.get("enabled"))
 

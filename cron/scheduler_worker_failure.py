@@ -25,6 +25,9 @@ def record_unknown_worker_outcome(
             return True
         error = error or execution["error"]
         scheduler.logger.error("Job '%s': %s", job["id"], error)
+        # Deliberately UNSCOPED (GXTD-819): the recovery lane must notify regardless of the
+        # dead worker's per-job secret_env — a worker that died mid-run may have consumed
+        # nothing or everything, and the operator ping is the only signal.
         scope_tokens = scheduler._install_fire_secret_scope()
         delivery_error = None
         try:
