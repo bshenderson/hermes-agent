@@ -49,7 +49,8 @@ def probe_local(base_url, model):
         connection.close()
 
 
-def select_elastic_runtime(*, enabled, profile, model, explicit_selection, intent, probe):
+def select_elastic_runtime(*, enabled, profile, model, explicit_selection, intent, probe,
+                           required_context=None):
     """Local homelab grant only; selection is not admission or replay authority.
 
     Intent belongs to the producer configuration, never inferred from user text.
@@ -59,6 +60,8 @@ def select_elastic_runtime(*, enabled, profile, model, explicit_selection, inten
         return None
     if intent not in {'responsive', 'substantial'}:
         raise AvailabilityRefused('Precision producer intent must be responsive or substantial. No model or tools dispatched.')
+    if required_context is not None and (type(required_context) is not int or required_context <= 0):
+        raise AvailabilityRefused('Invalid precision context requirement. No model or tools dispatched.')
     # These are independent resident admission resources, not retry destinations.
     # Substantial producers keep their direct-resident policy; no cold loading.
     resident = ('precision-default', GPTOSS_MODEL)
@@ -69,7 +72,11 @@ def select_elastic_runtime(*, enabled, profile, model, explicit_selection, inten
         except Exception:
             observed = None
         if isinstance(observed, dict) and observed.get('available') is True:
+            window = observed.get('context_length')
+            if required_context is not None and (type(window) is not int or window < required_context):
+                continue
             return {'model': candidate, 'runtime': None, 'local_no_wait': True,
+                    'context_length': window,
                     'warm_only': candidate == ELASTIC_MODEL,
                     'notice': f'Precision route: {candidate} ({intent}); selected before execution. Later contention refuses without route replay.'}
     raise AvailabilityRefused('Precision service unavailable; Gemma/Qwen/GPT-OSS not ready. No model or tools dispatched.')

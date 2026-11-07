@@ -19,6 +19,10 @@ from agent.turn_failure_copy import short_detail, site_copy
 logger = logging.getLogger("agent.conversation_loop")
 
 
+class PrecisionContextRefused(RuntimeError):
+    """Prepared local precision request no longer fits; never retry or reselect."""
+
+
 @dataclass
 class OuterErrorVerdict:
     """``action`` is ``"break"`` (turn ends with ``final_response``/``turn_exit_reason`` set)
@@ -55,6 +59,12 @@ def handle_outer_loop_error(
     # Count every escaped exception before classification so permanent failures
     # terminate even with an unlimited turn budget.
     _outer_error_count += 1
+
+    if isinstance(e, PrecisionContextRefused):
+        _turn_exit_reason = 'precision_context_unavailable'
+        failed = True
+        final_response = str(e)
+        return _verdict('break')
 
     # Interpreter shutdown makes every executor op raise: break.
     # Phase-aware error classification. The huge outer try/except spans both the actual API request and all

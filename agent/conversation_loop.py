@@ -693,7 +693,7 @@ def _persist_system_prompt(agent, failure_message: str, *, persist_tools: bool =
         logger.warning(failure_message, agent.session_id, exc)
 
 
-def _restore_pinned_tools(agent, session_row) -> list:
+def _restore_pinned_tools(agent, session_row, *, prepare_only=False) -> list:
     """Pin ``agent.tools`` to the session's persisted array (tools freeze); returns the names
     this surface built BEFORE the pin merged a previous surface's tools back in."""
     from tools.mcp_tool_agent import agent_tool_names, persist_agent_tool_names, restore_agent_tool_prefix
@@ -706,9 +706,10 @@ def _restore_pinned_tools(agent, session_row) -> list:
     try:
         if pin:
             restore_agent_tool_prefix(agent, pin)
-        elif session_row is not None and not getattr(agent, "_persist_disabled", False):
+        elif session_row is not None and not getattr(agent, "_persist_disabled", False) and not prepare_only:
             # No usable pin (swept row, a session from before pins): pin what this turn sends,
             # or every later hop re-derives tools[] until the next compaction.
+            # A prepare_only pass never writes: the ordinary turn owns the pin.
             persist_agent_tool_names(agent)
     except Exception:
         logger.debug("tool prefix restore skipped", exc_info=True)
@@ -738,7 +739,7 @@ def _refresh_bot_chat_tools(agent) -> None:
                        agent.session_id, exc)
 
 
-def _restore_or_build_system_prompt(agent, system_message, conversation_history):
+def _restore_or_build_system_prompt(agent, system_message, conversation_history, *, prepare_only=False):
     """Restore the cached system prompt from the session DB or build it fresh.
 
     Mutates ``agent._cached_system_prompt`` and persists a freshly-built prompt on first
@@ -764,6 +765,16 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     if stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt):
         # NULL/empty rows never reach this probe: they already rebuild below.
         if _bot_chat_prompt_stale(agent, stored_prompt):
+            if prepare_only:
+                # Preparation prices the runtime-valid stored bytes only. The
+                # once-per-change capability refresh (agent tools, the GLOBAL
+                # skills-index cache, the cache-break record, tool/prompt
+                # persistence) belongs to the ordinary turn; a preview pass that
+                # fired it would duplicate a process-wide mutation and count a
+                # cache break the request may never send. The request-assembly
+                # guard reprices the refreshed request against the window.
+                agent._cached_system_prompt = stored_prompt
+                return
             logger.info(
                 "Bot Chat capability epoch changed for session %s; rebuilding system prompt to "
                 "adopt the new capability surface (one-time prefix-cache break).",
@@ -785,12 +796,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             # once per capability change). Tools re-pin too: without it the next
             # turn's pin-restore would resurrect the pre-refresh toolset (#124211).
             # on_session_start not re-fired: continuation.
-            _persist_system_prompt(
-                agent,
-                "Session DB update_system_prompt failed after Bot Chat capability refresh "
-                "(session=%s): %s. The refresh will re-fire next turn.",
-                persist_tools=True,
-            )
+            if not prepare_only:
+                _persist_system_prompt(
+                    agent,
+                    "Session DB update_system_prompt failed after Bot Chat capability refresh "
+                    "(session=%s): %s. The refresh will re-fire next turn.",
+                    persist_tools=True,
+                )
             return
         # Continuing session — reuse the exact system prompt from the
         # previous turn so the Anthropic cache prefix matches.
@@ -807,7 +819,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         # ADDS what the new surface brought (a tui -> desktop switch pays a break no freeze can
         # avoid), and what it carries FORWARD is named in the note instead, so a tool that can
         # only answer ``tool_error("desktop only")`` here does not read as a live capability.
-        built_for_this_surface = _restore_pinned_tools(agent, session_row)
+        built_for_this_surface = _restore_pinned_tools(agent, session_row, prepare_only=prepare_only)
         if announced_switch:
             note_inert_pinned_tools(agent, built_for_this_surface)
         # Prompt-section callbacks are new-session-only; recover their frozen bytes
@@ -841,9 +853,30 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # EXISTING session's prompt (cwd drift, model switch) still keeps its pinned tools[]: this
     # surface's own build (the -q footprint, its tool_search catalog) would otherwise be
     # persisted over the pin below. Pinned first, so the prompt describes the tools sent.
-    built_for_this_surface = _restore_pinned_tools(agent, session_row)
-    agent._cached_system_prompt = agent._build_system_prompt(system_message)
-    if conversation_history:
+    built_for_this_surface = _restore_pinned_tools(agent, session_row, prepare_only=prepare_only)
+    # prepare_only runs on the SAME agent the ordinary turn then consumes, so a
+    # precision preview must not make that turn rebuild (and re-fire prompt
+    # builder work). The built bytes are stashed under the identity that
+    # _stored_prompt_matches_runtime checks plus the system_message object, so a
+    # model/provider/cwd switch (switch_model clears _cached_system_prompt and
+    # changes identity) can never hand the ordinary turn stale bytes;
+    # a prepare pass never records rebuild telemetry or persists — the ordinary
+    # turn owns both.
+    consumed = False
+    stash = getattr(agent, "_prepared_system_prompt_build", None)
+    if not prepare_only and isinstance(stash, tuple):
+        agent._prepared_system_prompt_build = None  # single-consume
+        if stash[:4] == (getattr(agent, "model", None), getattr(agent, "provider", None),
+                         str(resolve_agent_cwd()), system_message):
+            agent._cached_system_prompt = stash[4]
+            consumed = True
+    if not consumed:
+        agent._cached_system_prompt = agent._build_system_prompt(system_message)
+    if prepare_only:
+        agent._prepared_system_prompt_build = (getattr(agent, "model", None),
+            getattr(agent, "provider", None), str(resolve_agent_cwd()), system_message,
+            agent._cached_system_prompt)
+    if not prepare_only and conversation_history:
         record_prompt_rebuild(agent, stored_prompt, stored_state, agent._cached_system_prompt)
 
     # The rebuilt prompt describes the CURRENT surface, but a surface note left in the
@@ -852,6 +885,12 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # request naming a surface the conversation has left (#104414).
     stage_surface_switch_note(agent, agent._cached_system_prompt, conversation_history)
     note_inert_pinned_tools(agent, built_for_this_surface)
+
+    # Precision selection prices the ordinary restored/built prompt before
+    # compaction or auxiliary execution. Session lifecycle remains owned by the
+    # subsequent ordinary turn, not this preparation pass.
+    if prepare_only:
+        return
 
     # Persistence-disabled forks share their parent's session ID and are not real sessions.
     if not getattr(agent, "_persist_disabled", False):

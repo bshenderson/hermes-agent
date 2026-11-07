@@ -67,7 +67,7 @@ def test_authenticated_executor_selects_gptoss_before_only_model_invocation(cons
     from gateway.platforms import api_server as api
     import run_agent
     adapter, _, built, probe, resolver = constructor
-    probe.side_effect = lambda base, model: {'available': model == GPTOSS}
+    probe.side_effect = lambda base, model: {'available': model == GPTOSS, 'context_length': 131072}
     monkeypatch.setattr(adapter, '_profile_scope', lambda profile: nullcontext())
     adapter.gateway_runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True))
     monkeypatch.setattr('hermes_cli.profiles.profiles_to_serve', lambda **_: [('homelab-coordinator', None)])
@@ -97,5 +97,5 @@ def test_authenticated_executor_selects_gptoss_before_only_model_invocation(cons
         asyncio.run(adapter._make_profile_prefix_middleware()(request, handler))
     assert len(built) == 1 and built[0]['model'] == GPTOSS
     generation.assert_called_once()
-    assert [call.args[1] for call in probe.call_args_list] == [GEMMA, SPARKY, GPTOSS]
+    assert [call.args[1] for call in probe.call_args_list] == [GEMMA, SPARKY, GPTOSS] * 2
     resolver.assert_not_called()
