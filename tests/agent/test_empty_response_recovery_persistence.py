@@ -303,3 +303,29 @@ def test_same_words_in_a_second_response_are_not_a_reused_response(real_loop):
 
     assert result["final_response"] == "Done."
     assert result["response_reused"] is False
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content", "reasoning_details"])
+def test_post_tool_reasoning_continues_without_synthetic_user_in_real_loop(real_loop, field):
+    """GXTD-813: real file dispatch, recovery and SQLite persistence; scripted provider only."""
+    thinking = _response()
+    value = ([{"type": "reasoning.text", "text": "private fixture thought"}]
+             if field == "reasoning_details" else "private fixture thought")
+    setattr(thinking.choices[0].message, field, value)
+    result = real_loop.run([
+        _response(finish_reason="tool_calls", tool_calls=[_write_file_call(real_loop.ledger)]),
+        thinking,
+        _response("The fixture ledger was written."),
+    ], "record the fixture payment")
+
+    assert result["final_response"] == "The fixture ledger was written."
+    assert result["api_calls"] == 3
+    assert real_loop.ledger.read_text() == "PAYMENT #1 SENT\n"
+    requests = real_loop.agent.client.chat.completions.create.call_args_list
+    final_request = requests[-1].kwargs
+    # The SDK path may move actual messages into extra_body to bypass transforms.
+    rows = (final_request.get("extra_body") or {}).get("messages") or final_request["messages"]
+    assert sum(row["role"] == "user" for row in rows) == 1
+    assert not any(row.get("_empty_recovery_synthetic") for row in result["messages"])
+    assert "private fixture thought" not in result["final_response"]
+    _assert_saved_tool_pairs_stay_live(result, real_loop.db, real_loop.sid)

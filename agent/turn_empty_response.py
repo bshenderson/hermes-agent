@@ -2,7 +2,7 @@
 
 Runs when the model returned no visible text after ``<think>`` blocks. Ladder order is
 load-bearing: partial-stream recovery → reuse prior turn content (housekeeping tools only)
-→ one post-tool-call nudge → thinking-only prefill continuation (×2) → empty-response
+→ one post-tool-call nudge (genuinely empty only) → thinking-only prefill continuation (×2) → empty-response
 retries (budgeted, deterministic-empty short-circuit) → fallback provider → terminal
 ``(empty)`` sentinel. Nothing here imports ``agent.conversation_loop`` at module level.
 """
@@ -200,10 +200,18 @@ def recover_empty_response(
     # Ollama puts <think> in content, not reasoning_content, so _has_structured misses
     # it; detect here to route to prefill.
     _has_inline_thinking = bool(_INLINE_THINK_RE.search(final_response or ""))
+    # Structured reasoning is generation too: do not insert a synthetic user nudge
+    # before the bounded thinking continuation (upstream #34655, GXTD-813).
+    _has_structured = bool(
+        getattr(assistant_message, "reasoning", None)
+        or getattr(assistant_message, "reasoning_content", None)
+        or getattr(assistant_message, "reasoning_details", None)
+        or _has_inline_thinking
+    )
     if (
         _prior_was_tool
         and not getattr(agent, "_post_tool_empty_retried", False)
-        and not _has_inline_thinking  # thinking model still working — let prefill handle
+        and not _has_structured  # thinking model still working — let prefill handle
     ):
         agent._post_tool_empty_retried = True
         # Clear stale narration so it doesn't resurface on a later empty response.
@@ -223,12 +231,6 @@ def recover_empty_response(
 
     # Thinking-only prefill: append the reasoning as-is and continue so the model sees
     # its own reasoning and writes text.
-    _has_structured = bool(
-        getattr(assistant_message, "reasoning", None)
-        or getattr(assistant_message, "reasoning_content", None)
-        or getattr(assistant_message, "reasoning_details", None)
-        or _has_inline_thinking
-    )
     if _has_structured and agent._thinking_prefill_retries < 2:
         agent._thinking_prefill_retries += 1
         logger.info(
