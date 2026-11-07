@@ -108,3 +108,46 @@ def test_exhausted_reasoning_prefill_does_not_fall_back_to_post_tool_nudge(monke
     assert messages[-1]["_empty_terminal_sentinel"] is True
     assert messages[-1]["content"] == "(empty)"
     assert not any(row.get("_empty_recovery_synthetic") for row in messages)
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+@pytest.mark.parametrize("model,echo", [
+    ("gptoss-120b-openai-mxfp4-tp1-128k", True),
+    ("precision-default", False),
+])
+def test_post_tool_recovery_wire_projection_keeps_history_private(field, model, echo):
+    from agent.turn_context import build_api_messages
+
+    agent = _agent()
+    agent.provider = "custom"
+    agent.model = model
+    agent.base_url = "http://127.0.0.1:8090/v1"
+    agent.api_mode = "chat_completions"
+    agent.ephemeral_system_prompt = None
+    agent._current_turn_timestamp = 10000.0
+    agent._should_sanitize_tool_calls = lambda: False
+    messages = _history()
+    original = deepcopy(messages)
+    secret = "private fixture reasoning"
+    verdict = _recover(agent, SimpleNamespace(content="", tool_calls=None,
+                       **{field: secret}), messages)
+    recovered = deepcopy(messages)
+    wire, _ = build_api_messages(
+        agent, messages, current_turn_user_idx=0, ext_prefetch_cache="",
+        plugin_user_context="", moa_config=None, active_system_prompt="",
+    )
+    assert agent._needs_thinking_reasoning_pad() is echo
+    if echo:
+        assert wire[-1]["reasoning_content"] == secret
+    else:
+        assert "reasoning_content" not in wire[-1]
+    # Request assembly runs this real pass on the API copy, not durable history.
+    projected = agent._drop_thinking_only_and_merge_users(wire)
+    assert [row["role"] for row in projected] == ["user", "assistant", "tool"]
+    assert projected[-1]["tool_call_id"] == "call_fixture"
+    assert projected[1]["tool_calls"] == original[1]["tool_calls"]
+    assert messages == recovered
+    assert messages[:len(original)] == original
+    assert verdict.final_response == ""
+    assert not any(row.get("_empty_recovery_synthetic") for row in messages)
+    assert all(secret not in str(row.get("content", "")) for row in projected)
