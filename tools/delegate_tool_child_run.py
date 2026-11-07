@@ -571,7 +571,7 @@ def _build_result_entry(
                         and (t := flatten_message_text(m.get("content")).strip()) not in placeholders), "")
         if partial:
             interrupt_note, summary = summary.strip(), partial
-    elif result.get("failed") or result.get("error"):
+    elif result.get("failed") or result.get("error") or result.get("turn_exit_reason") == "guardrail_halt":
         # The loop returns the error text as final_response, which would otherwise read as "completed". Never report a
         # provider rejection as "max_iterations" — that is only truthful for real budget exhaustion.
         status, exit_reason = "failed", "error"
@@ -613,8 +613,26 @@ def _build_result_entry(
     # Model-visible per-delegation spend (unlike _child_cost_usd above).
     entry["cost_usd"] = round(entry["_child_cost_usd"], 6)
     entry["cost_status"] = _cost_status if isinstance(_cost_status, str) and _cost_status else "unknown"
+    # Lifecycle completion is not acceptance of the assigned artifact. Preserve the
+    # loop's typed stop, instead of making a controlled halt look like success.
+    turn_reason = result.get("turn_exit_reason")
+    if isinstance(turn_reason, str) and turn_reason:
+        entry["turn_exit_reason"] = turn_reason
+        entry["task_outcome"] = (
+            "interrupted" if status == "interrupted" else
+            "guard_halted" if turn_reason == "guardrail_halt" else
+            "failed" if status == "failed" else
+            "budget_exhausted" if exit_reason == "max_iterations" else "unassessed"
+        )
+        if turn_reason == "guardrail_halt" and status == "failed":
+            entry["failure_reason"] = "guardrail_halt"
+            if isinstance(result.get("guardrail"), dict):
+                entry["guardrail"] = dict(result["guardrail"])
     if status == "failed":
-        entry["error"] = result.get("error", "Subagent did not produce a response.")
+        entry["error"] = result.get("error") or (
+            "Subagent halted by tool guardrail; assignment not accepted."
+            if turn_reason == "guardrail_halt" else "Subagent did not produce a response."
+        )
         # Classified reason from the child loop (e.g. "rate_limit", "billing")
         # lets the parent tell a quota wall from a task error without parsing prose.
         _failure_reason = result.get("failure_reason")

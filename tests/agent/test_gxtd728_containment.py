@@ -65,6 +65,15 @@ def test_typed_refusal_real_turn_stops_without_another_provider_call():
     assert result["turn_exit_reason"] == "guardrail_halt"
     assert result["final_response"]
     assert result["guardrail"]["code"] in {"repeated_exact_failure_block", "identical_cycle_halt", "same_tool_failure_halt"}
+    # GXTD-813: preserve the real loop's controlled stop at the child-result seam.
+    from tools.delegate_tool_child_run import _SchemaOutcome, _build_result_entry
+
+    entry = _build_result_entry(agent, result, 0, 1.0, _SchemaOutcome(None, None, [], 0))
+    assert entry["status"] == "failed"
+    assert entry["task_outcome"] == "guard_halted"
+    assert entry["turn_exit_reason"] == "guardrail_halt"
+    assert entry["guardrail"] == result["guardrail"]
+    assert entry["summary"] == result["final_response"]
 
 
 @pytest.mark.parametrize("result", [None, "not json", "[]", '{"status": []}', '{"status": {}}', '{"status":"completed"}', '{"status":"running"}'])

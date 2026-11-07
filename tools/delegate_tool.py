@@ -352,6 +352,11 @@ def _run_single_child(
                     (completed=False with no failure fields), never for errors.
       truncated   == (exit_reason == "max_iterations").
 
+    Structured loop results additionally retain ``turn_exit_reason`` and ``task_outcome``:
+    guard_halted / budget_exhausted / interrupted / failed / unassessed. A guard halt is
+    failed/error even when the loop completed its cleanup and emitted a summary. A normal
+    finish remains unassessed: lifecycle completion does not validate the assignment.
+
     * ``"completed"``       — normal finish. See #97655.
     """
     child_progress_cb = getattr(child, "tool_progress_callback", None)
