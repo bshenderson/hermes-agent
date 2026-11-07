@@ -86,7 +86,11 @@ def constructor(monkeypatch):
         built.append(kwargs)
         return SimpleNamespace(model=kwargs['model'], provider=kwargs['provider'])
     monkeypatch.setattr(run_agent, 'AIAgent', build)
-    probe = Mock(return_value={'available': True, 'reason': 'ready'})
+    # These ingress fixtures isolate routing; prepared-prompt accounting is
+    # exercised independently in test_api_server_precision_context.py.
+    monkeypatch.setattr('gateway.platforms.api_server_precision_context.prepare_requirement',
+                        lambda *args: 8192)
+    probe = Mock(return_value={'available': True, 'reason': 'ready', 'context_length': 262144})
     monkeypatch.setattr(policy, 'probe_local', probe)
     return adapter, config, built, probe, resolver
 

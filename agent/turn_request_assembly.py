@@ -203,6 +203,9 @@ def assemble_api_request(
     # the canonical tool registry stays undecorated. Marked ``content`` becomes text
     # blocks the whitespace pass skips, so the same row's bytes vary across turns.
     tools_for_api = agent.tools
+    precision_guard = getattr(agent, '_hermes_precision_context_guard', None)
+    if callable(precision_guard):
+        precision_guard(agent, api_messages, tools_for_api)
     if agent._use_prompt_caching and agent.provider != "moa":
         from agent.prompt_caching import envelope_tool_part_cache_markers_supported
 

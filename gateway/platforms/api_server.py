@@ -2344,7 +2344,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         room_execution_policy: Optional[dict[str, Any]] = None,
         precision_availability_eligible: bool = False,
         precision_elastic_eligible: bool = False,
-        precision_availability_profile: Optional[str] = None) -> Any:
+        precision_availability_profile: Optional[str] = None,
+        precision_context=None) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
@@ -2401,7 +2402,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             _apply_runtime_agent_overrides(runtime_kwargs, precision_selection['runtime'])
         if precision_selection:
             model = precision_selection['model']
-        if precision_selection and precision_selection['notice'] and status_callback:
+        if precision_selection and precision_context is None and precision_selection['notice'] and status_callback:
             status_callback('route', precision_selection['notice'])
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
         from agent.domain_action_tools import policy_for_current
@@ -2451,6 +2452,22 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         from agent.domain_action_tools import constrain_agent
         try:
             constrain_agent(agent, domain_tool_policy)
+            if elastic_first and precision_selection and precision_context is not None:
+                from gateway.platforms.api_server_precision_context import qualify_selection
+                precision_selection = qualify_selection(
+                    agent, precision_context,
+                    profile=precision_availability_profile or _api_request_profile.get(),
+                    model='precision-default', intent=precision_config.get('precision_intent'),
+                    base_url=runtime_kwargs.get('base_url'), api_key=runtime_kwargs.get('api_key'),
+                    api_mode=runtime_kwargs.get('api_mode'))
+                model = precision_selection['model']
+                if _request_reasoning_config(model_options) is not None:
+                    agent.reasoning_config = request_reasoning_config
+                if precision_selection['notice'] and status_callback:
+                    status_callback('route', precision_selection['notice'])
+        except AvailabilityRefused as exc:
+            self._memory_sessions.checkin(agent)
+            raise _PrecisionUnavailableError(str(exc)) from exc
         except Exception:
             # Construction has already checked out this turn's memory owner;
             # the caller cannot check it in if construction never returns.
@@ -2459,6 +2476,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if precision_selection and precision_selection['local_no_wait']:
             overrides = dict(getattr(agent, 'request_overrides', {}) or {})
             overrides['extra_body'] = {**(overrides.get('extra_body') or {}), 'homelab_queue_timeout_seconds': 0}
+            if 'required_context' in precision_selection:
+                overrides['extra_body']['homelab_required_context'] = precision_selection['required_context']
             if precision_selection.get('warm_only'):
                 overrides['extra_body']['homelab_precision_warm_only'] = True
             agent.request_overrides = overrides
@@ -4320,7 +4339,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                             (not conversation_history or
                              (conversation_history[-1].get('role') == 'assistant' and
                               not conversation_history[-1].get('tool_calls')))),
-                        precision_availability_profile=request_profile)
+                        precision_availability_profile=request_profile,
+                        precision_context=(user_message, conversation_history))
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if owned_chat_history is not None:
