@@ -76,6 +76,7 @@ class SourceReport:
     skipped_claimed: list[str] = field(default_factory=list)    # earlier source won
     skipped_protected: list[str] = field(default_factory=list)  # bootstrap-auth guard
     skipped_invalid: list[str] = field(default_factory=list)    # bad env-var name
+    skipped_scope: list[str] = field(default_factory=list)      # outside a scoped apply (GXTD-819)
 
 
 @dataclass
@@ -309,8 +310,12 @@ class _Applier:
     """Apply phase state for one orchestrated pass: sequential, first-wins, attributed."""
 
     def __init__(self, env: MutableMapping[str, str], report: ApplyReport,
-                 protected: dict[str, str], preserve: frozenset) -> None:
+                 protected: dict[str, str], preserve: frozenset,
+                 scope: Optional[frozenset[str]] = None) -> None:
         self.env, self.report, self.protected, self.preserve = env, report, protected, preserve
+        # GXTD-819 apply-time allowlist (None = unrestricted). Gates EVERY name — including a
+        # derived profile alias — so a scoped pass can never write a name nobody declared.
+        self.scope = scope
         self.claimed: dict[str, str] = {}  # var → source name that won it
 
     def apply_source(self, source: SecretSource, cfg: dict, result: FetchResult,
@@ -337,6 +342,9 @@ class _Applier:
     def _try_apply(self, sr: SourceReport, source: SecretSource, override: bool,
                    var: str, value: str) -> bool:
         """Apply one var through the shared guard chain. True = applied."""
+        if self.scope is not None and var not in self.scope:
+            sr.skipped_scope.append(var)
+            return False
         if not is_valid_env_name(var):
             sr.skipped_invalid.append(var)
             return False
@@ -362,9 +370,18 @@ class _Applier:
 
 
 def apply_all(secrets_cfg: dict, home_path: Path,
-              environ: Optional[MutableMapping[str, str]] = None) -> ApplyReport:
+              environ: Optional[MutableMapping[str, str]] = None,
+              only_names: Optional[frozenset[str]] = None) -> ApplyReport:
     """Fetch from every enabled source and apply the merged result to ``environ``
     (default ``os.environ``).
+
+    ``only_names`` (GXTD-819) is an OPTIONAL apply-time allowlist: when given, a fetched name
+    outside it is recorded as ``skipped_scope`` and never applied, so one pass may resolve a
+    declared subset WITHOUT writing into the profile's shared caches. Narrowing happens AFTER
+    each source's ``fetch()`` (sources fetch as a unit — 1Password dedupes per reference,
+    Bitwarden pulls a whole project, the ``command`` helper prints one KEY=VALUE blob); this is
+    an apply/leakage bound, not a network-fetch bound. A declared name NO source supplies stays
+    absent from the report: the caller decides whether that is a failure.
 
     Precedence per env var, most-specific intent first: (1) ``secrets.preserve_existing``
     names always keep a pre-existing value, even against ``override_existing: true``;
@@ -387,6 +404,11 @@ def apply_all(secrets_cfg: dict, home_path: Path,
     enabled = _ordered_enabled_sources(secrets_cfg, scope=hermes_home_key(home_path))
     if not enabled:
         return report
+    if only_names is not None:
+        # A scoped pass with NO names declared resolves nothing: every source would be skipped
+        # below anyway (narrow_config -> None for mapped, apply-time scope for bulk), and an
+        # empty pass is exactly what a GXTD-819 empty-declaration job means: skip the work.
+        enabled = [s for s in enabled if only_names]
 
     preserve_raw = secrets_cfg.get("preserve_existing")
     preserve = frozenset(n.strip() for n in preserve_raw if isinstance(n, str) and n.strip()
@@ -400,6 +422,15 @@ def apply_all(secrets_cfg: dict, home_path: Path,
     protected: dict[str, str] = {}  # var → source that protects it
     for source in ordered:
         cfg = _section(secrets_cfg, source.name)
+        if only_names is not None:
+            # GXTD-819: a source that cannot carry any declared name is SKIPPED entirely
+            # (narrow_config -> None), so a scoped fire never pays for an unrelated vault pull.
+            try:
+                cfg = source.narrow_config(cfg, only_names)
+            except Exception:
+                cfg = None
+            if cfg is None:
+                continue
         result = _fetch_with_timeout(source, cfg, home_path, env)
         fetches.append((source, cfg, result))
         try:
@@ -411,7 +442,7 @@ def apply_all(secrets_cfg: dict, home_path: Path,
     # An alias never shadows a var some source supplies by its real name.
     supplied_directly = {v for _, _, r in fetches if r.ok for v in r.secrets if isinstance(v, str)}
 
-    applier = _Applier(env, report, protected, preserve)
+    applier = _Applier(env, report, protected, preserve, scope=only_names)
     for source, cfg, result in fetches:
         applier.apply_source(source, cfg, result, profile, supplied_directly)
     return report

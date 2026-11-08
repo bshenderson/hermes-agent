@@ -10,6 +10,10 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional, Sequence
+
+if TYPE_CHECKING:  # imported for annotations only: registry pulls third-party deps
+    from agent.secret_sources.registry import ApplyReport
 
 # Kept at module level on purpose: importing this module must fail when the dotenv install is
 # wiped (#57828) so early recovery provably runs before third-party imports (test_early_recovery).
@@ -180,10 +184,108 @@ def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, 
     turns to profiles that never ran the process-global dotenv path, so resolve against a private mapping
     seeded from that ``.env`` and record the per-home snapshot for ``build_profile_secret_scope()``.
     Fail-open / once-per-home like ``_apply_external_secret_sources``; never returns plaintext .env entries.
+    GXTD-819 per-fire SCOPED hydration is the separate, strict ``resolve_profile_secret_names`` —
+    deliberately not a flag here: the scoped path must never consult or write this function's
+    caches, and one entry point per posture keeps that boundary impossible to blur by accident.
     The one fail-closed case is D32's: under the remote config backend, a source that supplies a
     protected name raises :class:`ConfigBackendUnavailable` and records nothing for the home."""
     with _SECRET_SOURCE_CACHE_LOCK:
         return _hydrate_profile_secret_sources(Path(hermes_home))
+
+
+def resolve_profile_secret_names(
+    hermes_home: str | os.PathLike, names: Sequence[str]
+) -> dict[str, str]:
+    """GXTD-819 per-job hydration: resolve ONLY ``names`` against the profile's configured
+    sources, STRICTLY and freshly — no caching and no cache writes at all (never
+    ``_APPLIED_HOMES``, never the per-home snapshots, never ``_SECRET_SOURCES`` /
+    ``_SOURCE_SUPPLIED_NAMES``). Returns the subset of ``names`` a source actually supplies
+    (``{name: value}``); a name absent here has no external supply.
+
+
+    Unlike ``hydrate_profile_secret_sources`` this never trusts a snapshot cached earlier in
+    the process: every scoped fire re-validates against CURRENT config, so a source stopped
+    supplying a name means the declaring fire fails closed rather than running on a stale
+    value. Mapped sources narrow their own fetch (unrelated refs are never requested); bulk
+    sources fetch as a unit and are trimmed at apply time. The scoped resolve reads only
+    config/``.env``/global process env and writes NO module state, so it never contends with
+    the unscoped cache lock's publications and cannot interleave a partial result into them."""
+    requested = frozenset(str(name) for name in names)
+    if not requested:
+        return {}
+    report, local_env = _resolve_profile_secret_env(Path(hermes_home), requested)
+    if report is None or local_env is None:
+        return {}
+    return _applied_values(report, local_env)
+
+
+def _resolve_profile_secret_env(
+    home: Path, only_names: Optional[frozenset[str]] = None,
+) -> tuple[Optional[ApplyReport], Optional[dict[str, str]]]:
+    """One private resolve against a seeded mapping (never ``os.environ``); returns
+    ``(ApplyReport|None, local_env|None)`` — None/None on any config/fetch guard trip.
+
+    ``only_names=None`` resolves the full configured mapping (unchanged legacy internals); a
+    frozenset narrows every source per GXTD-819 and gates the apply phase. Callers do their own
+    bookkeeping: the unscoped publisher keeps ``_APPLIED_HOMES`` / ``_SECRET_SOURCES`` /
+    ``_record_supplied_names`` exactly as before, scoped callers read values only and write no
+    cache.
+    """
+    from agent.safe_worker_policy import worker_config_snapshot
+
+    if worker_config_snapshot() is not None:
+        return None, None
+    try:
+        cfg = _load_secrets_config(home)
+    except Exception:
+        return None, None
+    if not cfg:
+        return None, None
+
+    try:
+        from agent.secret_scope import _is_global_env, load_env_file
+        from agent.secret_sources.registry import apply_all
+
+        local_env = {name: value for name, value in os.environ.items() if _is_global_env(name)}
+        local_env.update(load_env_file(home / ".env"))
+        # Mirror load_hermes_dotenv()'s .op.env bootstrap (1Password token lives in gitignored .op.env)
+        # or cold profiles fail 1Password hydration. .env wins.
+        # Without seeding it here a cold profile configured for the supported .op.env flow fails 1Password
+        # hydration (sweeper review on #74549). .env values win — never override an existing key.
+        op_env = home / ".op.env"
+        if op_env.exists():
+            for _name, _value in load_env_file(op_env).items():
+                local_env.setdefault(_name, _value)
+        local_env["HERMES_HOME"] = str(home)
+        from hermes_cli.config_backend import get_config_backend
+
+        backend_before = get_config_backend()
+        env_before = dict(local_env)
+        if only_names is None:
+            # Unscoped callers keep the EXACT legacy call shape — a positional/kwarg-compatible
+            # old signature (test doubles, third-party callers) stays valid for the
+            # full-hydration path; only scoped passes learn the new keyword.
+            report = apply_all(cfg, home, environ=local_env)
+        else:
+            report = apply_all(cfg, home, environ=local_env, only_names=only_names)
+    except Exception:
+        return None, None
+    # Refuse before either scoped return or unscoped cache publication. The backend
+    # is latched before sources run; a source cannot disable its own protection.
+    _refuse_protected_env_from_sources(
+        report, backend_before, env_before, env=local_env, routed_home=home)
+    return report, local_env
+
+
+def _applied_values(report, local_env: dict[str, str]) -> dict[str, str]:
+    """``{name: value}`` for every name the report actually applied into ``local_env``."""
+    values: dict[str, str] = {}
+    for name in report.provenance:
+        value = local_env.get(name)
+        if value is None:
+            continue
+        values[name] = value
+    return values
 
 
 def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
@@ -201,43 +303,11 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
     _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
     _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
 
-    try:
-        cfg = _load_secrets_config(home)
-    except Exception:
+    report, local_env = _resolve_profile_secret_env(home)
+    if report is None or local_env is None:
         return {}
-    if not cfg:
-        return {}
-
-    try:
-        from agent.secret_scope import _is_global_env, load_env_file
-        from agent.secret_sources.registry import apply_all
-
-        local_env = {name: value for name, value in os.environ.items() if _is_global_env(name)}
-        local_env.update(load_env_file(home / ".env"))
-        # Mirror load_hermes_dotenv()'s .op.env bootstrap (1Password token lives in gitignored .op.env)
-        # or cold profiles fail 1Password hydration. .env wins.
-        # Without seeding it here a cold profile configured for the supported .op.env flow fails 1Password
-        # hydration (sweeper review on #74549). .env values win — never override an existing key.
-        op_env = home / ".op.env"
-        if op_env.exists():
-            for _name, _value in load_env_file(op_env).items():
-                local_env.setdefault(_name, _value)
-        local_env["HERMES_HOME"] = str(home)
-        env_before = dict(local_env)
-        report = apply_all(cfg, home, environ=local_env)
-    except Exception:
-        return {}
-
     if not report.sources:
         return {}
-    # D32, as on the process-global path: a source must never supply the config backend's own
-    # deployment or plane credential, for a routed profile either (this snapshot feeds that
-    # profile's secret scope, which the Portal/plane resolvers read). Checked before anything of
-    # this attempt is recorded: the remote backend refuses the profile (raises, nothing cached, so
-    # every retry refuses again until the mapping is removed); the file backend drops the selector.
-    from hermes_cli.config_backend import get_config_backend
-
-    _refuse_protected_env_from_sources(report, get_config_backend(), env_before, env=local_env, routed_home=home)
 
     # Routed profiles have no runtime reset path. Keep a failed source retryable so correcting its
     # profile-local bootstrap credentials takes effect on the next turn; successful sources from a
@@ -248,13 +318,10 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
     # or skipped because the private mapping already had it — is a source-owned name the routed-child scrub
     # must know about, or a sibling still inherits the launch value for it (review on f5f88d5058).
     _record_supplied_names(report)
-    values: dict[str, str] = {}
+    values = _applied_values(report, local_env)
     for name, applied in report.provenance.items():
-        value = local_env.get(name)
-        if value is None:
-            continue
-        _SECRET_SOURCES[name] = applied.source
-        values[name] = value
+        if name in values:
+            _SECRET_SOURCES[name] = applied.source
     _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
     return dict(values)
 

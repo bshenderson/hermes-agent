@@ -1705,6 +1705,63 @@ def _normalize_enabled_toolsets(value: Any) -> Optional[list[str]]:
     return [str(j).strip() for j in value if str(j).strip()]
 
 
+# GXTD-819: per-job EXTERNAL secret hydration scope. Like enabled_toolsets, an explicit [] is
+# meaningful ("hydrate NOTHING external for this job") and must survive as []; None means the
+# field is not authored and the scheduler keeps today's whole-profile hydration.
+_SECRET_ENV_UNSET = object()
+
+
+class MalformedSecretScopeError(ValueError):
+    """A ``secret_env`` record no fire can honor (non-list, non-str entry, bad env name).
+
+    Distinct type so the scheduler's preflight catches EXACTLY this class of configuration
+    defect — a stray ValueError from unrelated code keeps the pre-feature crash path."""
+
+
+def _normalize_secret_env(value: Any) -> Optional[list[str]]:
+    """Validate/normalize the ``secret_env`` job field. None clears the field (legacy
+    compatible behavior); a list of valid env-var names is stripped and de-duplicated
+    order-preserving; anything else raises ``MalformedSecretScopeError`` BEFORE anything is
+    stored (still a ``ValueError``, so generic callers that only catch ValueError see it)."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise MalformedSecretScopeError(
+            "secret_env must be a list of external secret env-var names "
+            "(or [] to hydrate no external secrets for this job).")
+    from agent.secret_sources.base import is_valid_env_name
+
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise MalformedSecretScopeError(
+                f"secret_env entries must be strings, got {type(item).__name__}.")
+        text = item.strip()
+        if not text:
+            continue
+        if not is_valid_env_name(text):
+            raise MalformedSecretScopeError(
+                f"secret_env entry {text!r} is not a valid env-var name.")
+        if text not in names:
+            names.append(text)
+    return names
+
+
+def resolve_job_secret_scope(job: dict[str, Any]):
+    """GXTD-819 fire-time scope for one job record.
+
+    Returns ``_SECRET_ENV_UNSET`` when the record does not author ``secret_env`` (keep today's
+    whole-profile hydration), or a ``frozenset`` of declared env-var names (possibly empty =
+    hydrate nothing external). Raises ``MalformedSecretScopeError`` for a malformed record — a
+    hand-edited non-list or a bad entry — so the scheduler fails the fire closed BEFORE any
+    side effect instead of silently hydrating everything an operator meant to exclude.
+    """
+    if "secret_env" not in job:
+        return _SECRET_ENV_UNSET
+    names = _normalize_secret_env(job.get("secret_env"))
+    return _SECRET_ENV_UNSET if names is None else frozenset(names)
+
+
 def _normalize_context_from(value: Any) -> Optional[list[str]]:
     """Accept a job id or a list of ids; anything else is None."""
     if isinstance(value, str):
@@ -1764,6 +1821,7 @@ _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "context_from": _normalize_context_from,
     "failure_deliver": _normalize_failure_deliver,
     "interpreter": _normalize_job_optional_text,
+    "secret_env": _normalize_secret_env,
     "timezone": jobs_time.normalize_timezone,
     "grace_minutes": jobs_time.normalize_grace_minutes,
     "catch_up": _normalize_catch_up,
@@ -1776,6 +1834,10 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "monitor_url": _normalize_job_optional_text,
     "interpreter": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
+    # GXTD-819: same contract on the update path — [] means "no external hydration" and must
+    # survive as [], while a malformed scope is rejected at authoring time (malformed records
+    # already stored stay fail-closed through resolve_job_secret_scope, not this path).
+    "secret_env": lambda value: None if value is None else _normalize_secret_env(value),
     # ``0`` is a real grace value (never catch up), so this normalizer must never use an
     # ``in {None, "", False}`` test — ``0 == False`` would silently clear it.
     "timezone": jobs_time.normalize_timezone,
@@ -1833,6 +1895,7 @@ def create_job(
     paused_reason: Optional[str] = None,
     pinned: bool = False,
     interpreter: Optional[str] = None,
+    secret_env: Optional[list[str]] = None,
     timezone: Optional[str] = None,
     grace_minutes: Optional[int] = None,
 ) -> dict[str, Any]:
@@ -1847,7 +1910,13 @@ def create_job(
     interpreter: absolute/``~`` Python for ``.py`` script/monitor_script, validated at run time
     (a venv can be rebuilt or moved after creation). timezone: IANA key pinning the schedule's
     wall clock (None/'' = inherit the profile zone). grace_minutes: catch-up window override
-    (0 = never catch up)."""
+    (0 = never catch up).
+    secret_env (GXTD-819): per-job EXTERNAL secret hydration scope — a list of env-var names this
+    job may resolve from the profile's configured external secret sources. ``[]`` hydrates NOTHING
+    external; the field being absent keeps today's whole-profile hydration; a declared name no
+    source supplies fails the fire closed before any side effect. Scopes EXTERNAL hydration only:
+    the profile's ``.env`` and managed ``.env`` still flow into the fire's secret scope."""
+
     if not isinstance(paused, bool):
         raise ValueError("paused must be a boolean.")
     if paused_reason is not None and not isinstance(paused_reason, str):
@@ -1933,10 +2002,13 @@ def create_job(
     }
     # Optional keys are persisted only when explicitly set: an absent key falls back to global
     # config (attach/reasoning) or to ``deliver`` (failure_deliver), byte-identical to pre-feature
-    # jobs.
+    # jobs. ``secret_env`` follows the same rule, but [] is a MEANINGFUL authored value (hydrate
+    # nothing external; GXTD-819) and persists as []; a None update clears the field back to
+    # compatible behavior via resolve_job_secret_scope.
     for key, value in (
         ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
+        ("secret_env", f["secret_env"]),
         ("timezone", f["timezone"]), ("grace_minutes", f["grace_minutes"]),
         ("catch_up", f["catch_up"]),
     ):
