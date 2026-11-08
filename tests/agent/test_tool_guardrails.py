@@ -298,7 +298,7 @@ def test_web_evidence_synthesis_hint_is_configurable_and_resets_per_turn():
     assert controller.after_call("web_search", {"query": "q3"}, "ok", failed=False).action == "allow"
 
 
-def test_web_search_redirect_skips_more_search_after_request_threshold_without_halt():
+def test_web_search_redirect_requests_runtime_halt_without_global_tool_ban():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             web_evidence_synthesis_hint_after=0,
@@ -313,7 +313,8 @@ def test_web_search_redirect_skips_more_search_after_request_threshold_without_h
     redirect = controller.before_call("web_search", {"query": "q3"})
     assert redirect.action == "redirect"
     assert redirect.code == "web_search_synthesis_redirect"
-    assert redirect.should_halt is False
+    assert redirect.should_halt is True
+    assert redirect.allows_execution is False
     assert controller.halt_decision is None
 
     # Full-text fetches stay available after the search redirect; they often

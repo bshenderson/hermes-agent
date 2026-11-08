@@ -378,7 +378,11 @@ class TestSecondaryProfileFatalRecovery:
     @pytest.mark.parametrize("outcome", ["recovered", "degraded", "failed", "superseded", "shutdown"])
     async def test_secondary_reconnect_persists_only_owned_recovery(self, monkeypatch, outcome):
         from gateway.status import read_runtime_status
+        from hermes_constants import get_hermes_home
 
+        profile_home = get_hermes_home() / "profiles" / "default-profile"
+        profile_home.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text("{}\n")
         runner = _secondary_recovery_runner()
         replacement = _SecondaryRecoveryAdapter(retryable=False)
         replacement.has_fatal_error = outcome == "failed"
@@ -394,10 +398,12 @@ class TestSecondaryProfileFatalRecovery:
             "other:email", platform_state="fatal", error_code="other_error",
             error_message="Other mailbox unavailable",
         )
+        assert await asyncio.to_thread(flush_runtime_status)
         before = read_runtime_status()["platforms"]
 
-        async def attempt(profile, platform):
+        async def attempt(profile, platform, predecessor):
             assert (profile, platform) == ("default-profile", Platform.EMAIL)
+            assert predecessor is None
             if outcome == "superseded":
                 runner._profile_adapters[profile] = {platform: winner}
             if outcome == "shutdown":
@@ -405,7 +411,11 @@ class TestSecondaryProfileFatalRecovery:
             return replacement, outcome != "failed"
 
         monkeypatch.setattr(runner, "_secondary_reconnect_attempt", attempt)
-        await runner._run_secondary_profile_reconnect("default-profile", Platform.EMAIL)
+        monkeypatch.setattr(runner, "_schedule_planned_restart_replay", lambda: None)
+        monkeypatch.setattr(runner, "_schedule_resume_pending_sessions", lambda **kwargs: None)
+        await asyncio.wait_for(
+            runner._run_secondary_profile_reconnect("default-profile", Platform.EMAIL), timeout=2)
+        assert await asyncio.to_thread(flush_runtime_status)
         after = read_runtime_status()["platforms"]
         assert after["other:email"] == before["other:email"]
         assert "email" not in after

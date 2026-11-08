@@ -280,6 +280,15 @@ class GatewaySecondaryReconnectMixin:
                             profile_map[platform] = adapter
                             hand_over_held_inbound(predecessor, adapter)
                             self._sync_voice_mode_state_to_adapter(adapter)
+                            # Only the installed owner may clear this profile's stale fatal state.
+                            degraded = adapter.send_path_degraded
+                            self._update_platform_runtime_status(
+                                f"{profile_name}:{platform.value}",
+                                platform_state="retrying" if degraded else "connected",
+                                error_code=None,
+                                error_message=adapter.DEGRADED_STATUS_MESSAGE if degraded else None,
+                                needs_attention=False, retrying_since=None,
+                            )
                             logger.info("✓ %s reconnected (profile: %s)", platform.value, profile_name)
                             await self._redeliver_failed_obligations_for_platform(
                                 platform, profile=profile_name

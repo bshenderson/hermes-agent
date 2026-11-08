@@ -112,6 +112,27 @@ def _result(normalized: list[dict], reply: dict, shown: list[dict] | None = None
     return json.dumps(result, ensure_ascii=False)
 
 
+def _valid_reply(reply, questions) -> bool:
+    """Refuse malformed delivery envelopes instead of treating them as skipped forms."""
+    if not isinstance(reply, dict) or reply.get("outcome") not in (
+        "submitted", "cancelled", "timed_out", "undelivered"
+    ):
+        return False
+    answers = reply.get("answers")
+    if not isinstance(answers, dict):
+        return False
+    entries = {q["qid"]: q for q in questions}
+    for qid, value in answers.items():
+        if qid not in entries:
+            return False
+        if value is None or isinstance(value, str):
+            continue
+        if not (entries[qid]["multi_select"] and isinstance(value, list)
+                and all(isinstance(item, str) for item in value)):
+            return False
+    return True
+
+
 def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
     """Ask 1-5 questions in one call. ``callback(questions) -> {"answers", "outcome", "notice"?}``
     is platform injected (cli.py / gateway / tui_gateway) and receives the normalized list."""
@@ -144,6 +165,9 @@ def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
     with human_input_request("clarify", prompt="\n".join(q["question"] for q in shown)) as human:
         try:
             reply = callback(shown)
+            if not _valid_reply(reply, normalized):
+                human.outcome = "error"
+                return tool_error("Clarify delivery protocol error: invalid response envelope.")
             human.outcome = str(reply.get("outcome") or "")
             return _result(normalized, reply, shown)
         except Exception as exc:

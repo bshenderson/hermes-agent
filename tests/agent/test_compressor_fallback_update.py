@@ -16,6 +16,7 @@ def _make_agent_with_compressor() -> AIAgent:
     agent.base_url = "https://openrouter.ai/api/v1"
     agent.api_key = "sk-primary"
     agent.api_mode = "chat_completions"
+    agent.max_tokens = None
     agent.client = MagicMock()
     agent.quiet_mode = True
 

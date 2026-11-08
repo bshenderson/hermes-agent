@@ -939,9 +939,9 @@ class CLITuiMixin:
             ("_gateway_command_wait", lambda: self._gateway_command_wait.set()))):
             return
         overlay_cleared = self._tui_clear_blocking_overlays(event)
-        if overlay_cleared and not (self._agent_running and self.agent):
+        if overlay_cleared and not ((self._agent_running or self._command_running) and self.agent):
             return
-        if self._agent_running and self.agent and not (event.app.current_buffer.text or self._attached_images):
+        if (self._agent_running or self._command_running) and self.agent and not (event.app.current_buffer.text or self._attached_images):
             if now - self._last_ctrl_c_time < 2.0:
                 print("\n" + t("cli.tui.force_exiting"))
                 self._should_exit = True
@@ -962,9 +962,9 @@ class CLITuiMixin:
             ("_model_picker_state", self._close_model_picker))):
             return
         overlay_cleared = self._tui_clear_blocking_overlays(event)
-        if overlay_cleared and not (self._agent_running and self.agent):
+        if overlay_cleared and not ((self._agent_running or self._command_running) and self.agent):
             return
-        if self._agent_running and self.agent and not (event.app.current_buffer.text or self._attached_images):
+        if (self._agent_running or self._command_running) and self.agent and not (event.app.current_buffer.text or self._attached_images):
             print("\n" + t("cli.tui.interrupting"))
             request_hard_interrupt(self.agent)
         else:
