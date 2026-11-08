@@ -4,10 +4,20 @@ These tests intentionally expose the recovered lexical candidate's limits.
 No authority-state producer is fabricated to make them pass.
 """
 import copy
+import json
 
 import pytest
 
 from tests.agent.test_gxtd641_checkpoint_preservation import compressor, history, ledger
+
+
+@pytest.fixture(autouse=True)
+def source_bound_contract(compressor, tmp_path):
+    """Exercise the explicitly selected successor, not the legacy lexical strategy."""
+    path = tmp_path / 'config.yaml'
+    config = json.loads(path.read_text())
+    config['auxiliary']['compression']['summary_strategy'] = 'source_bound'
+    path.write_text(json.dumps(config))
 
 
 @pytest.mark.parametrize('source', [

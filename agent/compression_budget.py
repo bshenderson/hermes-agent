@@ -29,6 +29,8 @@ def best_effort_mode():
 
 def lossless_settings():
     from agent.auxiliary_client import _get_auxiliary_task_config
+    from agent.compression_source_bound import enabled
+    enabled()  # Explicit source custody must not silently degrade to ordinary lossy mode.
     config = _get_auxiliary_task_config('compression')
     if config.get('lossless_input') is not True:
         return None

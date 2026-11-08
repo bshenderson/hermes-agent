@@ -15,7 +15,7 @@ FORMAT = {'type': 'json_schema', 'json_schema': {'name': 'source_excerpts', 'str
 def configured_summary(compressor, turns, source, budget, started, records):
     from agent.auxiliary_client import _get_auxiliary_task_config
     strategy = _get_auxiliary_task_config('compression').get('summary_strategy', 'narrative')
-    if strategy == 'narrative':
+    if strategy in {'narrative', 'source_bound'}:
         return None
     if strategy == 'best_effort':
         # Explicit best-effort mode: the caller's bounded map/reduce narrative

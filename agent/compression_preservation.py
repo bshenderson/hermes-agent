@@ -115,6 +115,9 @@ def decode_records(content):
 
 def collect_records(compressor, messages, output_tokens):
     """Harvest the unpruned canonical transcript, never prior model prose."""
+    from agent.compression_source_bound import enabled, collect
+    if enabled():
+        return collect(compressor, messages, output_tokens)
     from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
     from agent.protected_events import collect_events, SourceRecords
     from agent.auxiliary_client import _get_auxiliary_task_config
@@ -173,7 +176,9 @@ def encode_records(records):
             value = value.replace(char, replacement)
         quoted.append(value)
     from agent.protected_events import encode_events
-    return CONTRACT + '\n' + START + '\n' + '\n'.join(quoted) + '\n' + END + encode_events(getattr(records, 'events', []))
+    from agent.compression_source_bound import encode_rows
+    rows = ('\n' + encode_rows(records.source_rows)) if hasattr(records, 'source_rows') else ''
+    return CONTRACT + '\n' + START + '\n' + '\n'.join(quoted) + '\n' + END + rows + encode_events(getattr(records, 'events', []))
 
 
 def _bounded_user_excerpts(turns, byte_budget):
@@ -353,6 +358,8 @@ def augment_summary(compressor, summary, turns, records=None, output_tokens=None
 def frame_summary(compressor, summary, records, output_tokens):
     """Restore trusted records only AFTER all model-summary normalization."""
     from agent.context_compressor import _redact_compaction_text
+    from agent.compression_source_bound import strip_model_rows
+    summary = strip_model_rows(summary)
     summary = compressor._strip_summary_prefix(summary)
     from agent.protected_events import strip_model_events
     summary = strip_model_events(summary)
@@ -446,6 +453,9 @@ def validate_checkpoint(compressor, original, candidate, output_tokens):
             if START in text or CONTRACT in text:
                 raise CompressionBudgetError('lexical custody marker in best-effort checkpoint')
         else:
+            from agent.compression_source_bound import enabled, validate
+            if enabled():
+                validate(text, expected)
             decoded = decode_records(text)
             if encode_records(decoded) not in text:
                 raise CompressionBudgetError('checkpoint source encoding is not canonical sanitized data')
