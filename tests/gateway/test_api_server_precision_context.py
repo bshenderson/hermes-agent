@@ -286,8 +286,6 @@ def test_real_ingress_history_size_moves_route_through_prepared_accounting(monke
     monkeypatch.setattr(adapter, '_ensure_session_db', lambda: None)
     monkeypatch.setattr(adapter, '_select_agent_runtime', lambda kw, model, **_: (model, None, None, None))
     monkeypatch.setattr(adapter, '_profile_scope', lambda _: nullcontext())
-    monkeypatch.setattr(adapter, '_derive_browser_control_principal', lambda _: None)
-    monkeypatch.setattr(adapter, '_browser_control_transport_family', lambda _: '')
     monkeypatch.setattr(adapter, '_expected_api_key', lambda: 'fixture-authenticated-key')
     monkeypatch.setattr(adapter, '_activate_admitted_request', lambda: None)
     monkeypatch.setattr(adapter, '_record_api_metrics', lambda *_: None)
@@ -421,6 +419,7 @@ def test_real_assembly_late_growth_is_terminal_break_with_fresh_estimate():
         agent._hermes_precision_context_guard = guard_prepared_request
         agent.request_overrides = {'extra_body': {'homelab_queue_timeout_seconds': 0}}
         agent._copy_reasoning_content_for_api = lambda s, t: None
+        agent._outbound_retired_image_ids = None
         agent._should_sanitize_tool_calls = lambda: False
         agent._sanitize_api_messages = lambda v: v
         agent._emit_warning = agent._vprint = lambda *a, **k: None

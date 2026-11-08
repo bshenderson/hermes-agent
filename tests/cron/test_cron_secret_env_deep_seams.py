@@ -171,7 +171,7 @@ def test_body_passes_preflight_with_valid_scope_and_runs(homes, monkeypatch):
     monkeypatch.setattr(scheduler, "mark_job_run", lambda *a, **k: None)
     monkeypatch.setattr(scheduler, "finish_execution", lambda *a, **k: None)
     monkeypatch.setattr(scheduler, "_save_compose_deliver", lambda *a, **k: None)
-    monkeypatch.setattr(scheduler, "_finish_completed_run", lambda *a, **k: True)
+    monkeypatch.setattr("cron.scheduler_bookkeeping.finish_completed_run", lambda *a, **k: True)
 
     class _Identity:
         pass

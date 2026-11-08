@@ -96,7 +96,13 @@ def transition(tmp_path):
     )
     (package / "source_build.py").write_text(
         "from hermes_cli.probe import event\n"
-        "def build_update_products(root, *, desktop): event('build', desktop=desktop)\n"
+        "def build_update_products(root, *, desktop, after_dependencies=None):\n"
+        "    after_dependencies()\n"
+        "    event('build', desktop=desktop)\n"
+    )
+    (package / "update_launch_files.py").write_text(
+        "from hermes_cli.probe import event\n"
+        "def refresh_launch_files(): event('launch_files')\n"
     )
     (package / "source_stamp.py").write_text(
         "from hermes_cli.probe import event\n"
@@ -110,6 +116,7 @@ def transition(tmp_path):
                  package / "source_completion.py")
     shutil.copy2(Path(update_completion.__file__).with_name("update_lock.py"),
                  package / "update_lock.py")
+    shutil.copy2(Path(update_completion.__file__).with_name("_startup_fast.py"), package / "_startup_fast.py")
     shutil.copy2(Path(update_completion.__file__).with_name("_subprocess_compat.py"),
                  package / "_subprocess_compat.py")
     (package / "gitlock.py").write_text(
@@ -227,6 +234,7 @@ def test_old_process_new_git_tree_completes_in_fresh_python(transition, tmp_path
         [sys.executable, "-c", driver, update_completion.__file__, new, json.dumps(request)],
         cwd=root, env={**os.environ, "PYTHONPATH": str(root), "HERMES_HOME": request["home"]},
         capture_output=True, text=True, timeout=30,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     response = json.loads(result.stdout.split("RESULT=")[1])

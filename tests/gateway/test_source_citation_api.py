@@ -164,7 +164,13 @@ def test_named_profile_mirror_cannot_inherit_citation_access(tmp_path, monkeypat
     monkeypatch.setenv('HERMES_HOME', str(root))
     async def run():
         async with client_store(tmp_path) as (_, adapter, db, _):
-            adapter.gateway_runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True))
+            from gateway.session_authorities import SessionAuthorities
+            authorities = SessionAuthorities(root, multiplexed=True)
+            authorities.add(root, SimpleNamespace(db=db, profile_id=str(root)))
+            assert authorities.for_home(root).db is db
+            assert authorities.for_home(named) is None
+            adapter.gateway_runner = SimpleNamespace(
+                config=SimpleNamespace(multiplex_profiles=True), session_authorities=authorities)
             app = web.Application(middlewares=[adapter._make_profile_prefix_middleware()])
             for method, path, handler in adapter._http_route_table():
                 app.router.add_route(method, path, handler)

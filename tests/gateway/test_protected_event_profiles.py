@@ -37,7 +37,13 @@ def test_signed_ingress_profile_middleware(tmp_path, monkeypatch, topology):
         'key': 'disposable-api-bearer', 'protected_event_public_keys': [public]}))
     adapter._session_db = db
     if topology == 'multiplex':
-        adapter.gateway_runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True))
+        from gateway.session_authorities import SessionAuthorities
+        authorities = SessionAuthorities(home, multiplexed=True)
+        authorities.add(home, SimpleNamespace(db=db, profile_id=str(home)))
+        assert authorities.for_home(home).db is db
+        assert authorities.for_home(named) is None
+        adapter.gateway_runner = SimpleNamespace(
+            config=SimpleNamespace(multiplex_profiles=True), session_authorities=authorities)
     app = web.Application(middlewares=[adapter._make_profile_prefix_middleware()])
     for method, path, handler in adapter._http_route_table():
         app.router.add_route(method, path, handler)

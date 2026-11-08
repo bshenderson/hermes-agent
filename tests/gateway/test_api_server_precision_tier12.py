@@ -71,8 +71,6 @@ def test_authenticated_executor_selects_gptoss_before_only_model_invocation(cons
     monkeypatch.setattr(adapter, '_profile_scope', lambda profile: nullcontext())
     adapter.gateway_runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True))
     monkeypatch.setattr('hermes_cli.profiles.profiles_to_serve', lambda **_: [('homelab-coordinator', None)])
-    monkeypatch.setattr(adapter, '_derive_browser_control_principal', lambda _: None)
-    monkeypatch.setattr(adapter, '_browser_control_transport_family', lambda _: '')
     monkeypatch.setattr(adapter, '_expected_api_key', lambda: 'fixture-authenticated-key')
     monkeypatch.setattr(adapter, '_activate_admitted_request', lambda: None)
     monkeypatch.setattr(adapter, '_record_api_metrics', lambda *_: None)

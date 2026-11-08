@@ -15,7 +15,7 @@ def test_classic_application_constructs_with_selected_editing_mode(monkeypatch, 
     from hermes_cli import cli_tui_runtime_mixin
 
     monkeypatch.setattr(cli, "_select_classic_cli_pt_output", lambda stream: DummyOutput())
-    monkeypatch.setattr(cli_tui_runtime_mixin.pet_render, "supports_kitty_placeholders", lambda: False)
+    monkeypatch.setattr(cli_tui_runtime_mixin.terminal_image, "supports_kitty_placeholders", lambda: False)
     instance = object.__new__(cli.HermesCLI)
     instance._vim_mode = vim_mode
     with create_pipe_input() as pipe:

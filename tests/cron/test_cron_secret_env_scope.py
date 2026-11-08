@@ -219,10 +219,12 @@ def test_create_job_secret_env_persistence(tmp_path, monkeypatch):
 
     plain = jobs.create_job("say hi", "10m")
     assert "secret_env" not in plain
-    scoped = jobs.create_job("script job", "10m", script="echo hi", no_agent=True,
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/fixture.sh").write_text("#!/bin/sh\nprintf 'hi\\n'\n")
+    scoped = jobs.create_job("script job", "10m", script="fixture.sh", no_agent=True,
                              secret_env=["DECLARED_KEY", "DECLARED_KEY"])
     assert scoped["secret_env"] == ["DECLARED_KEY"]
-    empty = jobs.create_job("none job", "10m", script="echo hi", no_agent=True,
+    empty = jobs.create_job("none job", "10m", script="fixture.sh", no_agent=True,
                             secret_env=[])
     assert empty["secret_env"] == []
     assert jobs.get_job(empty["id"])["secret_env"] == []
