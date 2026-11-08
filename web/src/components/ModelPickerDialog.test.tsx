@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModelPickerDialog } from "./ModelPickerDialog";
+import { auxiliaryModelOptions } from "../lib/auxiliary-model-options";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -29,6 +30,24 @@ async function mount() {
 }
 
 describe("graphical model labels", () => {
+  it("renders a task-only service and applies its original routing IDs", async () => {
+    host = document.createElement("div"); document.body.append(host);
+    root = createRoot(host);
+    const apply = vi.fn();
+    const assignment = { provider: "llamacpp-vision", model: "vision-default" };
+    await act(async () => { root.render(<MemoryRouter><ModelPickerDialog
+      currentAssignment={assignment} alwaysGlobal onClose={vi.fn()} onApply={apply}
+      loader={async () => auxiliaryModelOptions(data, assignment)} /></MemoryRouter>); });
+    expect(document.querySelector("header p")?.textContent).toContain("Vision service · Homelab · Vision");
+    const row = [...document.querySelectorAll<HTMLElement>('[role="option"],button')]
+      .find(e => e.textContent?.includes("Vision service"));
+    expect(row).toBeDefined();
+    await act(async () => row!.click());
+    const button = [...document.querySelectorAll("button")].find(e => e.textContent === "Switch");
+    await act(async () => button!.click());
+    expect(apply).toHaveBeenCalledWith({ ...assignment, persistGlobal: true, confirmExpensiveModel: false });
+  });
+
   it("renders provider labels while submitting the exact machine selector", async () => {
     const apply = await mount();
     expect(document.body.textContent).toContain("Qwen3.8 Chat (160K)");

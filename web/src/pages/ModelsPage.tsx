@@ -45,6 +45,7 @@ import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { ModelReloadConfirm } from "@/components/ModelReloadConfirm";
 import { errorMessage } from "@/lib/api-error";
 import { assignmentToPickerCurrent } from "@/lib/model-picker-current";
+import { auxiliaryAssignmentLabel, auxiliaryModelOptions } from "@/lib/auxiliary-model-options";
 
 const PERIODS = [
   { label: "7d", days: 7 },
@@ -626,7 +627,7 @@ function AuxiliaryTasksModal({
             const eff = cur?.effective;
             const effRoute =
               eff?.provider && eff.provider !== "auto"
-                ? `${eff.provider} · ${eff.model || "(provider default)"}`
+                ? auxiliaryAssignmentLabel(eff)
                 : "auto (use main model)";
             return (
               <div
@@ -640,12 +641,12 @@ function AuxiliaryTasksModal({
                       {t.hint}
                     </span>
                   </div>
-                  <div className="text-xs font-mono text-text-secondary truncate">
+                  <div className="text-xs text-text-secondary truncate" title={cur ? `${cur.provider} · ${cur.model}` : undefined}>
                     {isAuto && t.inheritFrom
                       ? `inherits ${auxTaskLabel(aux?.tasks, t.inheritFrom)} · ${effRoute}`
                       : isAuto
                         ? "auto (use main model)"
-                        : `${cur?.provider} · ${cur?.model || "(provider default)"}`}
+                        : auxiliaryAssignmentLabel(cur)}
                   </div>
                 </div>
                 {t.inheritFrom && !isAuto && (
@@ -682,7 +683,10 @@ function AuxiliaryTasksModal({
         {picker && picker.kind === "aux" && (
           <ModelPickerDialog
             key={`picker-${refreshKey}`}
-            loader={api.getModelOptions}
+            loader={async (options) => auxiliaryModelOptions(
+              await api.getModelOptions(options),
+              aux?.tasks.find((a) => a.task === picker.task),
+            )}
             alwaysGlobal
             currentAssignment={assignmentToPickerCurrent(
               aux?.tasks.find((a) => a.task === picker.task),
