@@ -58,7 +58,7 @@ export function formatPickerCurrentLabel(
   }
   const row = providers.find((p) => p.slug === current.provider);
   const model = row?.model_labels?.[current.model] || current.model.trim() || "(unknown)";
-  const provider = current.provider.trim();
+  const provider = row?.name || current.provider.trim();
   return provider ? `${model} · ${provider}` : model;
 }
 
