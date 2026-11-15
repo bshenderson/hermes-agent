@@ -2525,6 +2525,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     """Invoke a single tool (agent-level or registry-dispatched) and return the result string;
     no display logic. Used by the concurrent path; the sequential path keeps its own inline
     invocation for display."""
+    if getattr(agent, '_delegation_context_only', False) is True:
+        return json.dumps({'error': 'tool_denied_for_supplied_context_child'})
     from agent.inline_tool_executors import (
         InlineToolContext, apply_transform_tool_result, emit_terminal_post_tool_call,
         resolve_invoke_tool_executor, tool_hook_ids

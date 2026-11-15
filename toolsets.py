@@ -476,6 +476,8 @@ def agent_tool_surface(agent: Any, tools: list[dict[str, Any]]) -> list[dict[str
     session that joins its delegations in the turn (``delegation.gateway_mode``), the joined ``delegate_task``
     variant (``agent.oneshot_footprint.oneshot_tool_schemas``). Applied to FRESH definitions (load, MCP refresh)
     before any merge: a pinned or carried entry keeps the bytes already sent."""
+    if getattr(agent, '_delegation_context_only', False) is True:
+        return []
     from agent.oneshot_footprint import agent_is_oneshot, oneshot_tool_schemas
     from tools.delegate_tool_config import agent_joins_delegation
     drops = agent_tool_drops(agent)
