@@ -45,7 +45,7 @@ def lossless_settings():
 
 
 def summarize_bounded(source, build_prompt, call, *, context_length, output_tokens,
-                      safety_tokens=1024, max_levels=4, build_chunk_prompt=None):
+                      safety_tokens=1024, max_levels=4, build_chunk_prompt=None, telemetry=None):
     budget = context_length - output_tokens - safety_tokens
     if min(budget, output_tokens, safety_tokens) <= 0:
         raise ValueError('invalid compression budget')
@@ -64,6 +64,8 @@ def summarize_bounded(source, build_prompt, call, *, context_length, output_toke
             raise RuntimeError('empty chunk summary')
         return result
     current = source
+    if isinstance(telemetry, dict):
+        telemetry.update(chunk_count=0, chunking=False)
     for _ in range(max_levels):
         raw = current.encode('utf-8')
         if len(raw) <= available:
@@ -76,7 +78,12 @@ def summarize_bounded(source, build_prompt, call, *, context_length, output_toke
                 end -= 1
             chunks.append(raw[start:end].decode('utf-8'))
             start = end
-        summaries = [invoke(chunk, chunk=True) for chunk in chunks]
+        summaries = []
+        for chunk in chunks:
+            if isinstance(telemetry, dict):
+                telemetry['chunking'] = True
+                telemetry['chunk_count'] += 1
+            summaries.append(invoke(chunk, chunk=True))
         reduced = '\n\n'.join(f'CHUNK {i + 1} SUMMARY:\n{text}' for i, text in enumerate(summaries))
         if len(reduced.encode('utf-8')) >= len(raw):
             raise RuntimeError('chunk summaries did not shrink; preserve original conversation')

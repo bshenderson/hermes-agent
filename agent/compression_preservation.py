@@ -380,7 +380,7 @@ def frame_summary(compressor, summary, records, output_tokens):
     return result
 
 
-def frame_best_effort(compressor, summary, records, output_tokens):
+def frame_best_effort(compressor, summary, records, output_tokens, *, kept_messages=()):
     """Restore trusted event custody only, with no lexical ledger block.
 
     Same model-frame stripping as frame_summary; a conventional best-effort
@@ -404,18 +404,23 @@ def frame_best_effort(compressor, summary, records, output_tokens):
                      + r'\n.*?(?=^## |\Z)', '', summary).strip()
     pointer = work_state_pointer(compressor)
     events = encode_events(records.events).lstrip('\n') if records.events else ''
-    mandatory = '\n\n'.join(part for part in (pointer, events) if part)
+    from agent.context_compressor import _extract_pruned_skill_names, _reinject_pruned_skill_markers
+    from agent.context_compressor_tail import with_skill_safety_rule, SKILL_SAFETY_RULE
+    # Reload markers and their rule must survive optional-narrative clipping.
+    skills = _reinject_pruned_skill_markers('', _extract_pruned_skill_names(summary)).strip()
+    summary = summary.replace(SKILL_SAFETY_RULE, '').strip()
+    mandatory = '\n\n'.join(part for part in (pointer, events, skills) if part)
     from agent.context_compressor import _SUMMARY_END_MARKER
     # Assembly adds its end marker later; reserve those exact bytes now.
     reserve = len(('\n\n' + _SUMMARY_END_MARKER).encode('utf-8'))
     def render(prose):
-        return compressor._with_summary_prefix(
+        framed = compressor._with_summary_prefix(
             '\n\n'.join(part for part in (prose, mandatory) if part))
-    available = output_tokens - reserve - len(render('').encode('utf-8'))
-    if available < 0:
+        return with_skill_safety_rule(framed, [], kept_messages)[0]
+    if len(render('').encode('utf-8')) + reserve > output_tokens:
         raise CompressionBudgetError('mandatory checkpoint exceeds output byte budget')
-    if mandatory:
-        available -= 2  # separator between optional prose and mandatory state
+    # Empty rendering strips separators; price a nonempty sentinel instead.
+    available = output_tokens - reserve - len(render('x').encode('utf-8')) + 1
     raw = summary.encode('utf-8')
     if len(raw) > max(0, available):
         notice = '\n[Optional summary excerpt; omitted narrative remains in session history.]'
@@ -433,6 +438,9 @@ def validate_checkpoint(compressor, original, candidate, output_tokens):
     from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
     if candidate == original:
         return
+    compressor._checkpoint_diagnostic('final_validation', size=sum(
+        len(_text(_handoff_only_content(m.get('content'))).encode('utf-8'))
+        for m in candidate if compressor._is_context_summary_message(m)), limit=output_tokens)
     best_effort = best_effort_mode()
     expected = (collect_state_records(compressor, original) if best_effort
                 else collect_records(compressor, original, output_tokens))
@@ -481,6 +489,7 @@ def refuse_replacement(compressor, previous_summary, error):
     compressor._last_compress_aborted = True
     compressor._last_compression_made_progress = False
     compressor._last_summary_error = str(error)
+    compressor._checkpoint_diagnostic(error=error)
 
 
 def reject_installation(agent, original, candidate, attempt, *, in_place=True):

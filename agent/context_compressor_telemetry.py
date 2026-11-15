@@ -58,9 +58,47 @@ class CompressionTelemetryMixin:
             "tool_results_pruned": None, "reasoning_items_pruned": None, "has_focus_topic": False,
             # True when the summary came from an opt-in prepared (background) pass (compression.prepare_ahead).
             "prepared_summary": False,
+            "aux_call_count": 0, "aux_finish_reason": None,
+            "aux_usage_prompt_tokens": None, "aux_usage_completion_tokens": None,
+            "checkpoint_stage": None, "checkpoint_bytes": None, "checkpoint_limit_bytes": None,
+            "summary_error_code": None,
         }
         self._active_compression_telemetry = self._last_compression_telemetry = telemetry
         return telemetry
+
+    def _checkpoint_diagnostic(self, stage=None, *, size=None, limit=None, error=None):
+        """Only fixed codes and numeric sizes; never publish exception/transcript text."""
+        t = getattr(self, '_active_compression_telemetry', None)
+        if not isinstance(t, dict):
+            return
+        if stage is not None:
+            t['checkpoint_stage'] = stage
+        if size is not None:
+            t['checkpoint_bytes'] = size
+        if limit is not None:
+            t['checkpoint_limit_bytes'] = limit
+        if error is not None:
+            from agent.compression_budget import CompressionBudgetError
+            codes = {'mandatory checkpoint exceeds output byte budget': 'mandatory_byte_limit',
+                     'final checkpoint exceeds output byte budget': 'checkpoint_byte_limit'}
+            t['summary_error_code'] = codes.get(str(error),
+                'budget_refusal' if isinstance(error, CompressionBudgetError) else
+                'native_output_length' if t.get('aux_finish_reason') == 'length' else 'summary_failure')
+
+    def _record_aux_terminal(self, response):
+        """Native usage totals are distinct from estimated prompt sizes and reservations."""
+        t = getattr(self, '_active_compression_telemetry', None)
+        if not isinstance(t, dict):
+            return
+        from agent.context_compressor import _response_finish_reason
+        reason = _response_finish_reason(response)
+        t['aux_finish_reason'] = reason if reason in {'stop', 'length', 'tool_calls', 'content_filter'} else 'unknown'
+        usage = response.get('usage') if isinstance(response, dict) else getattr(response, 'usage', None)
+        for field in ('prompt_tokens', 'completion_tokens'):
+            value = usage.get(field) if isinstance(usage, dict) else getattr(usage, field, None)
+            if type(value) is int and value >= 0:
+                key = 'aux_usage_' + field
+                t[key] = (t.get(key) or 0) + value
 
     def _record_compression_regions(
         self, *, head_messages: list[dict[str, Any]], middle_messages: list[dict[str, Any]],
@@ -80,6 +118,7 @@ class CompressionTelemetryMixin:
         telemetry = getattr(self, "_active_compression_telemetry", None)
         if not isinstance(telemetry, dict):
             return
+        telemetry['aux_call_count'] = telemetry.get('aux_call_count', 0) + 1
         telemetry["aux_prompt_tokens"] = estimate_messages_tokens_rough(prompt_messages)
         # The summary prompt is built fresh per attempt and never estimated again; don't let the memo pin it.
         forget_message_token_memo(prompt_messages)
