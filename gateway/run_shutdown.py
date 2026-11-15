@@ -290,9 +290,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
 
         def _discard_worker(done_future: asyncio.Future) -> None:
             workers.pop(done_future, None)
-            # Workers that outlive their starting coroutine have no later waiter: consume the
-            # terminal exception so asyncio emits no unhandled-future warning.
-            # See #98973.
+            # The turn's last snapshot may still include this detached worker.
+            self._persist_active_agents()
+            # No later waiter consumes a detached worker's terminal exception (#98973).
             if not done_future.cancelled():
                 with suppress(Exception):
                     done_future.exception()
