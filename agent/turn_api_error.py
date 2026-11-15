@@ -79,6 +79,16 @@ def handle_api_error(
     if agent.thinking_callback:
         agent.thinking_callback("")
 
+    from agent.terminal_refusal import is_no_replay_refusal
+    if is_no_replay_refusal(api_error):
+        # Before provider self-heal, compression, fallback and autorecovery:
+        # those are all new dispatches, even on another route/credential.
+        message = 'Generation refused by the ownership gate. No automatic replay was attempted.'
+        return _verdict('return', {
+            'final_response': message, 'messages': messages, 'api_calls': api_call_count,
+            'completed': False, 'failed': True, 'error': message,
+            'failure_reason': 'dispatch_refused', 'failure_retryable': False})
+
     if getattr(agent, '_hermes_precision_no_replay', False) is True:
         # Initial availability is not permission to replay a dispatched generation,
         # shrink context after refusal, rotate credentials or migrate a tool-owning

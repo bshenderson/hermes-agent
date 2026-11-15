@@ -41,6 +41,7 @@ class FailoverReason(enum.Enum):
     upstream_blocked = "upstream_blocked"  # 403 from a WAF/CDN/proxy in front of the provider — key is healthy, fallback
     overloaded = "overloaded"            # 503/529 — provider overloaded, backoff
     server_error = "server_error"        # 500/502 — internal server error, retry
+    dispatch_refused = "dispatch_refused"  # Versioned no-replay ownership refusal
     timeout = "timeout"                  # Connection/read timeout — rebuild client + retry
     ssl_cert_verification = "ssl_cert_verification"  # Deterministic TLS chain failure — fail fast with guidance
     context_overflow = "context_overflow"  # Context too large — compress, not failover
@@ -1078,6 +1079,11 @@ def classify_api_error(
     ``api_key`` identifies an anonymous request; a host or fairshare reason alone does not.
     The credential is never included in the returned context."""
     from hermes_cli.anon_auth import is_anonymous_request
+    from agent.terminal_refusal import is_no_replay_refusal
+    if is_no_replay_refusal(error):
+        return ClassifiedError(reason=FailoverReason.dispatch_refused, retryable=False,
+                               status_code=412, provider=provider, model=model,
+                               message='Request refused by ownership gate.')
     status_code = _extract_status_code(error)
     # Some SDK RateLimitErrors (OpenAI-compatible relays) may not set .status_code; force 429.
     if status_code is None and type(error).__name__ == "RateLimitError":

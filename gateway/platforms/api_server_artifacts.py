@@ -24,6 +24,7 @@ class CompletedReceiptStore:
     """Finite transport retention only; never schedules or resumes producer work."""
 
     TTL = 6 * 3600
+    SCHEMA = 'hermes.artifacts.v1'
     CAPACITY = 256
     MAX_RECEIPT_BYTES = 15 * 1024 * 1024
     MAX_TOTAL_BYTES = 128 * 1024 * 1024
@@ -64,7 +65,7 @@ class CompletedReceiptStore:
 
     def save(self, origin, receipt, *, now=None):
         key = self._origin(origin)
-        if (not isinstance(receipt, dict) or receipt.get('schema') != 'hermes.artifacts.v1'
+        if (not isinstance(receipt, dict) or receipt.get('schema') != self.SCHEMA
                 or receipt.get('origin') != origin):
             raise ValueError('Invalid completed receipt')
         encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False)

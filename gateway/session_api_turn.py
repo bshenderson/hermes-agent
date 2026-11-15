@@ -57,7 +57,7 @@ def check_api_turn(authority, ref, payload):
         # 'browser_control' is accepted and ignored: admissions persisted while the removed
         # browser-extension control existed may carry it and must still recover.
         if (set(data) - {'history', 'settings', 'turn_author', 'media', 'run_owner_scope', 'browser_control',
-                         'relay_metadata', 'resume_unanswered'}
+                         'relay_metadata', 'resume_unanswered', 'authored_origin'}
                 or data.get('resume_unanswered', True) is not True
                 or not {'history', 'settings'} <= set(data)
                 or not isinstance(data.get('relay_metadata', {}), dict)
@@ -66,6 +66,12 @@ def check_api_turn(authority, ref, payload):
             raise RuntimeStoreError('invalid_params')
         if set(data['settings']) - set(_SETTING_KEYS):
             raise RuntimeStoreError('invalid_params')
+        if 'authored_origin' in data:
+            from gateway.platforms.api_server_artifacts import CompletedReceiptStore
+            try:
+                CompletedReceiptStore._origin(data['authored_origin'])
+            except ValueError as exc:
+                raise RuntimeStoreError('invalid_params') from exc
     settings = payload.get('api_turn_v1', {}).get('settings') or api_settings(authority, ref)
     check_api_settings(adapter, settings)
     return adapter
@@ -166,6 +172,10 @@ def admit_api_steps(adapter, **kwargs):
     payload = json.loads(_json({'text': kwargs['user_message'], 'api_turn_v1': {
         'history': None if kwargs.get('history_from_session') else kwargs['conversation_history'], 'settings': settings}}))
     run_owner_scope = kwargs.get('run_owner_scope')
+    if kwargs.get('authored_origin') is not None:
+        # Authenticated ingress only; not request JSON or reusable session settings.
+        # The admitting authority owns the profile independently of HTTP observers.
+        payload['api_turn_v1']['authored_origin'] = dict(kwargs['authored_origin'])
     if run_owner_scope is not None:
         if not _valid_owner_scope(run_owner_scope):
             raise RuntimeStoreError('invalid_params')

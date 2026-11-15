@@ -3771,7 +3771,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
         approval_session_key: Optional[str] = None, media_file_turn=None, media_request_prompt=None,
-        domain_action_turn=None, owned_chat_history=None, walked_from: Optional[str] = None) -> tuple:
+        domain_action_turn=None, owned_chat_history=None, walked_from: Optional[str] = None,
+        authored_origin=None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -3801,7 +3802,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 bind_declared_conversation=bind_declared_conversation, request_id=request_id, run_owner_scope=run_owner_scope,
                 history_from_session=history_from_session, session_history_delivery=session_history_delivery,
                 turn_author=turn_author, resume_unanswered_turn=resume_unanswered_turn, relay_metadata=relay_metadata,
-                approval_notify_callback=approval_notify_callback, approval_session_key=approval_session_key)
+                approval_notify_callback=approval_notify_callback, approval_session_key=approval_session_key,
+                authored_origin=authored_origin)
         loop = asyncio.get_running_loop()
         # ContextVars do not follow run_in_executor threads: capture here, re-enter in _run().
         request_profile = _api_request_profile.get()
@@ -3979,7 +3981,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         try:
 # Worker-scoped count rides along so the shutdown close gate still sees the thread
             # after this handler task is cancelled (#116535); released in the worker's finally.
-            result, usage = await _api_runs._submit_api_worker(loop, _run)
+            from gateway.platforms.api_server_terminal import run_with_disposition
+            result, usage = await _api_runs._submit_api_worker(
+                loop, lambda: run_with_disposition(self, _run, request_profile, authored_origin))
             return result, usage
         finally:
             self._inflight_agent_runs -= 1

@@ -324,6 +324,9 @@ async def settle_and_deliver(authority, live, ref, row, response, outcome):
         from gateway.session_ingress import deliver_settled, fire_post_delivery
         await deliver_settled(authority, admission_id)
         await fire_post_delivery(authority, admission_id)
+        if row['payload'].get('api_turn_v1', {}).get('authored_origin'):
+            from gateway.platforms.api_server_terminal import retain_authority_failure
+            await asyncio.to_thread(retain_authority_failure, authority, row)
         await authority._resolve_settled_waiter(admission_id, response)
         return True
     finally:

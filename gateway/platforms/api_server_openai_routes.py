@@ -868,7 +868,7 @@ class OpenAICompatRoutesMixin:
         return agent_task, agent_ref
 
     async def _handle_authored_receipt(self, request: web.Request) -> web.Response:
-        """Read only a completed turn's retained receipt; never invoke an agent."""
+        """Read retained success or producer failure; absence is nondispositive."""
         from hermes_constants import get_hermes_home
         from gateway.platforms.api_server import _api_request_profile
         from gateway.platforms.api_server_artifacts import artifact_binding, CompletedReceiptStore
@@ -885,6 +885,12 @@ class OpenAICompatRoutesMixin:
             return web.json_response({'error': 'Invalid authenticated artifact origin'}, status=400)
         store = CompletedReceiptStore(get_hermes_home() / 'authored-receipts.sqlite3')
         receipt = await asyncio.to_thread(store.get, origin)
+        if receipt is None:
+            from gateway.platforms.api_server_terminal import FailureDispositionStore
+            failure = FailureDispositionStore(get_hermes_home() / 'authored-failures.sqlite3')
+            disposition = await asyncio.to_thread(failure.get, origin)
+            if disposition is not None:
+                return web.json_response({'status': 'failed', 'disposition': disposition})
         return web.json_response({'status': 'completed', 'receipt': receipt} if receipt is not None
                                  else {'status': 'unavailable'})
 
@@ -1073,6 +1079,8 @@ class OpenAICompatRoutesMixin:
                 _api_request_profile.get() or 'default',
                 artifact_origin['subject_id'], artifact_origin['chat_id'])
         run_kwargs.update(self._authority_chat_kwargs(request, provided_session_id))
+        if artifact_origin:
+            run_kwargs['authored_origin'] = dict(artifact_origin)
         # This is presentation only. The ordinary API-key/session authorization
         # above still applies; it grants no internal ingress or control authority.
         if media_file_turn is not None:
