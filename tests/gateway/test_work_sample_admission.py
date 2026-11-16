@@ -109,10 +109,7 @@ async def case(home, outcome, other):
                 print('AUTHORITY_TASKS', [(str(t), t.done()) for t in getattr(authority, '_mutation_tasks', ())], flush=True)
             assert live == int(other), (outcome, live)
             assert control == int(other)
-            if outcome in ('success', 'cancelled'):
-                assert saved == int(other)
-            else:
-                assert saved == int(other) + 1  # characterization: omitted retirement publication
+            assert saved == int(other)
             assert adapter._pending_agent_requests == 0
             if remaining is not None:
                 assert not remaining.done()

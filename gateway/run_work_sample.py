@@ -17,6 +17,8 @@ def bind_work_sample_owner(runner):
     """Bind at startup, before adapters or callbacks can publish."""
     runner._work_sample_loop = asyncio.get_running_loop()
     runner._work_sample_context = copy_context()
+    from gateway.work_activity import bind_owner
+    bind_owner(runner, runner._work_sample_loop, runner._work_sample_context)
 
 
 def _best_effort_count(read):

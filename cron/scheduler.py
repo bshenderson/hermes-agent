@@ -846,6 +846,9 @@ def release_running_job(
         _running_worker_pids.pop(key, None)
         _scope_isolated_job_ids.discard(key)
 
+    from gateway.work_activity import notify_work_changed
+    notify_work_changed()
+
 
 def _inflight_min_allowance_minutes() -> float:
     """Stale allowance floor (min): ``cron.inflight_max_minutes``, else env escape hatch/default."""
@@ -1095,6 +1098,9 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
             _forced_release_count += 1
             stale.append((job_id, age, allowance, fut, reason))
 
+    if stale:
+        from gateway.work_activity import notify_work_changed
+        notify_work_changed()
     for job_id, age, allowance, fut, _reason in stale:
         _record_stale_release(by_id.get(job_id) or {}, job_id, age, allowance, fut, _reason)
     return [s[0] for s in stale]
@@ -2909,6 +2915,8 @@ def run_one_job(
                 executions.pop(execution_token, None)
                 if not executions:
                     _running_fire_owners.pop(_fire_key, None)
+        from gateway.work_activity import notify_work_changed
+        notify_work_changed()
 
 
 _OWNERSHIP_LOST_INTERRUPTED = "Interrupted by shutdown before terminal completion."

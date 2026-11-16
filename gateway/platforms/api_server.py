@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import itertools
 import json
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import nullcontext, suppress
 from contextvars import ContextVar, copy_context
 from functools import wraps
 import logging
@@ -791,6 +791,8 @@ def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
     if reservation["active"]:
         reservation["active"] = False
         adapter._pending_agent_requests = max(0, adapter._pending_agent_requests - 1)
+        from gateway.work_activity import notify_work_changed
+        notify_work_changed()
 
 
 def _require_auth(handler):
@@ -802,19 +804,6 @@ def _require_auth(handler):
             return auth_err
         return await handler(self, request, *args, **kwargs)
     return _wrapped
-
-
-@contextmanager
-def _reserve_pending_api_work(adapter):
-    """Keep externally-triggered background work visible across awaits; a handler may detach
-    the reservation to a task whose done callback then owns release."""
-    reservation = {"active": True, "detached": False}
-    adapter._pending_agent_requests += 1
-    try:
-        yield reservation
-    finally:
-        if not reservation["detached"]:
-            _release_pending_api_work(adapter, reservation)
 
 
 class _IdempotencyCache:
@@ -3542,7 +3531,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         draining = self._draining_response()
         if draining is not None:
             return draining
-        with _reserve_pending_api_work(self) as reservation:
+        from gateway.platforms.api_server_work import reserve_pending_api_work
+        with reserve_pending_api_work(self) as reservation:
             body = {}
             with suppress(Exception):
                 body = await request.json()
