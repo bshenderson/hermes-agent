@@ -1091,7 +1091,7 @@ def _prepare_runtime_status_update(
     error_code: Any = _UNSET, error_message: Any = _UNSET, needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET, served_profiles: Any = _UNSET, session_store: Any = _UNSET,
     parked_profiles: Any = _UNSET, multiplex_standalone_reason: Any = _UNSET,
-    platform_metrics: Any = _UNSET,
+    platform_metrics: Any = _UNSET, work_sample: Any = _UNSET,
     ingress_url: Any = _UNSET, listener_base: Any = _UNSET, clear_profile_platforms: bool = False,
     drop_profile_platforms: Optional[str] = None, keep_platforms: Iterable[str] = (),
     load_existing: bool = True, reload_existing: bool = False,
@@ -1107,21 +1107,10 @@ def _prepare_runtime_status_update(
         # The module snapshot is only ever reassigned (never mutated in place) and
         # submit() copies again, so the previous snapshot can be handed out as-is.
         previous_payload = _runtime_status_state
-        payload = copy.deepcopy(previous_payload)
         current_record = _build_pid_record()
-        payload.setdefault("platforms", {})
-        if not isinstance(payload["platforms"], dict):
-            payload["platforms"] = {}
-        if clear_profile_platforms or drop_profile_platforms:
-            drop_prefix = f"{drop_profile_platforms}:" if drop_profile_platforms else None
-            payload["platforms"] = {
-                k: v for k, v in payload["platforms"].items()
-                if not isinstance(k, str) or ":" not in k
-                or (drop_prefix is not None and not k.startswith(drop_prefix)) or k in keep_platforms
-            }
-        payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time")})
-        payload["updated_at"] = _utc_now_iso()
-        payload.update(_get_code_identity_fields())
+        from gateway.status_runtime_payload import prepare_payload
+        payload = prepare_payload(previous_payload, current_record,
+                                  clear_profile_platforms, drop_profile_platforms, keep_platforms)
         _apply_set_fields(payload, (
             ("gateway_state", gateway_state, None), ("exit_reason", exit_reason, None),
             ("restart_requested", restart_requested, bool),
@@ -1133,6 +1122,14 @@ def _prepare_runtime_status_update(
             ("multiplex_standalone_reason", multiplex_standalone_reason, lambda v: str(v) if v else None),
             ("session_store", session_store, _coerce_session_store),
         ))
+        if active_agents is not _UNSET:
+            # A legacy count-only writer must not inherit an unrelated sample.
+            from gateway.run_work_sample import project_work_sample
+            payload['work_sample'] = project_work_sample(
+                work_sample, pid=current_record['pid'], start_time=current_record['start_time'],
+                total=payload['active_agents'])
+        elif previous_payload.get('pid') != current_record['pid'] or previous_payload.get('start_time') != current_record['start_time']:
+            payload['work_sample'] = None
         if platform is not _UNSET:
             platform_payload = copy.deepcopy(payload["platforms"].get(platform, {}))
             if not isinstance(platform_payload, dict):

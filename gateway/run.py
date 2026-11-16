@@ -3683,9 +3683,9 @@ class GatewayRunner(
         # ``active_work`` names each unit only while draining — that is when an observer (``hermes
         # update``) needs to know WHAT holds the gateway open; a per-turn write would be wasted I/O.
         active_work = self._describe_active_work() if gateway_state == "draining" else None
-        _write_runtime_status_quiet(
-            gateway_state=gateway_state, exit_reason=exit_reason,
-            restart_requested=self._restart_requested, active_agents=self._active_work_count(),
+        from gateway.run_work_sample import publish_work_sample
+        publish_work_sample(self, gateway_state=gateway_state, exit_reason=exit_reason,
+            restart_requested=self._restart_requested,
             active_work=active_work)
 
     def _running_agent_ids(self) -> set:

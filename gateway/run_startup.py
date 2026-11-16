@@ -1701,6 +1701,8 @@ class GatewayStartupMixin:
 
     async def start(self) -> bool:
         """Start the gateway and all configured platform adapters."""
+        from gateway.run_work_sample import bind_work_sample_owner
+        bind_work_sample_owner(self)
         try:
             return await self._start_impl()
         finally:
