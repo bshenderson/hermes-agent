@@ -838,6 +838,10 @@ class _ChildRun:
         import uuid as _uuid
         self.child_task_id = self.subagent_id or f"subagent-{self.task_index}-{_uuid.uuid4().hex[:8]}"
         self.parent_task_id = getattr(self.parent_agent, "_current_task_id", None)
+        if getattr(self.child, '_delegation_context_only', False) is True:
+            self.parent_task_id = None
+            self.wall_start = time.time()
+            return
         # Seed the child's cwd record from the parent's: same starting directory,
         # but the child's later `cd`s stay in its own record. Per-session container
         # isolation keys containers by task_id; the child must share the PARENT's.

@@ -80,10 +80,39 @@ Keep schemas forgiving: require only the fields you will actually read. Tasks wi
 ## How Subagent Context Works
 
 :::warning Critical: Subagents Know Nothing
-Subagents start with a **completely fresh conversation**. They have zero knowledge of the parent's conversation history, prior tool calls, or anything discussed before delegation. The subagent's only context comes from the `goal` and `context` fields the parent agent populates when it calls `delegate_task`.
+Subagents start with a fresh conversation rather than a copy of the parent's entire transcript. The parent must supply the task's relevant context explicitly. Legacy construction can still inherit configured parent prefill and workspace information; a tool-free target profile alone does not prohibit those transfers or inherited parent tools. For a stricter supplied-text specialist, use the opt-in profile boundary below.
 :::
 
-One exception: when the parent has a resolved workspace directory, every subagent's system prompt embeds that workspace's **project context files** (`.hermes.md` > AGENTS.md chain > CLAUDE.md > `.cursorrules` — the same discovery, priority, and size caps as the main agent's system prompt; SOUL.md is excluded). Subagents working in a repo operate under the repo's own conventions without having to rediscover them.
+In legacy construction, when the parent has a resolved workspace directory, the subagent's system prompt can embed that workspace's **project context files** (`.hermes.md` > AGENTS.md chain > CLAUDE.md > `.cursorrules` — the same discovery, priority, and size caps as the main agent's system prompt; SOUL.md is excluded). Subagents working in a repo operate under the repo's own conventions without having to rediscover them.
+
+### Opt-in supplied-context-only profile children
+
+For a trusted, allowlisted profile-routed specialist that reasons only over the
+supplied task, set this in the target profile's `config.yaml`:
+
+```yaml
+delegation:
+  child_boundary: supplied_context_only
+```
+
+This is a native construction policy, not a new model-call argument. It removes
+the child's callable tools regardless of omitted, empty or nonempty caller
+toolsets, including automatic context tools and tool-discovery bridges. Tool
+refresh/prefix restoration cannot restore tools, and native middleware and
+direct invocation refuse dispatch. The parent retains its own tools unchanged.
+
+The child does not inherit parent prefill, parent workspace hints, workspace
+seeding/read snapshots or parent memory loading. It remains a leaf, still subject
+to the existing depth, concurrency, cancellation and result-return owners. It
+continues to receive its own target profile instructions and the explicitly
+supplied goal/context. Removing implicit inheritance does not redact a private
+fact that the parent explicitly copies into that brief, and this is not an OS
+sandbox or a replacement for authenticated profile authorization.
+
+The only supported explicit value is `supplied_context_only`; another value
+refuses construction. Omit the key to preserve legacy behavior. Unprofiled and
+unenrolled children keep their existing inheritance contract. This first policy
+intentionally grants zero tools, not a configurable nonempty capability ceiling.
 
 This means the parent agent must pass **everything** the subagent needs in the call:
 
