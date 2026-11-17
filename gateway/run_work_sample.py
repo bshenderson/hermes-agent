@@ -89,7 +89,6 @@ def project_work_sample(value, *, pid, start_time, total):
 def publish_work_sample(runner, **fields):
     """Publish one interval's components and their sum, without a second recount."""
     from gateway.run import _write_runtime_status_quiet
-    from gateway.run_runtime import managed_turn_count
     try:
         current_loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -111,6 +110,16 @@ def publish_work_sample(runner, **fields):
             # The owner can close between the liveness read and dispatch.
             _write_runtime_status_quiet(**fields, active_agents=runner._active_work_count())
         return
+    context = getattr(runner, '_work_sample_context', None)
+    if context is not None:
+        return context.copy().run(_publish_owner_sample, runner, **fields)
+    return _publish_owner_sample(runner, **fields)
+
+
+def _publish_owner_sample(runner, **fields):
+    """Count and write in the captured owner scope, including same-loop callers."""
+    from gateway.run import _write_runtime_status_quiet
+    from gateway.run_runtime import managed_turn_count
     from gateway.status import _build_pid_record
 
     global _sequence
