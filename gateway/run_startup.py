@@ -102,6 +102,8 @@ class GatewayStartupMixin:
     _startup_ownership_conflict: bool = False
 
     def _serving_state(self) -> str:
+        if getattr(self, '_external_drain_active', False):
+            return 'draining'
         return "degraded" if self._startup_parked_platforms else "running"
 
     def _park_last_fatal_platform(self, adapter) -> bool:
@@ -1714,6 +1716,10 @@ class GatewayStartupMixin:
 
     async def _start_impl(self) -> bool:
         logger.info("Starting Hermes Gateway...")
+        from gateway.drain_control import drain_requested
+        # A retained maintenance marker must fence recovery and the first adapter connect,
+        # rather than waiting for the background watcher after listeners are already open.
+        self._external_drain_active = await asyncio.to_thread(drain_requested)
         self._start_install_faulthandler()
         await self._start_log_startup_environment()
         if await self._abort_startup_if_shutdown_requested():

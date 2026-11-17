@@ -79,6 +79,14 @@ def test_native_queue_recovers_only_after_current_adapter_publication(tmp_path):
                 evidence.append({'pid': proc.pid, 'epoch': desc['authority_epoch'], 'rows': rows()})
         extra['routes'] = {'fixture': {'prompt': '{text}', 'deliver': 'log'}}
         config.write_text(json.dumps(cfg))
+        from gateway.drain_control import write_drain_request, clear_drain_request
+        write_drain_request(home=home, principal='startup-fence-fixture')
+        with daemon(root, home, env, barrier=False) as (proc, desc):
+            assert rows() == {'safe': 'queued'} and not peer.requests
+            state = json.loads((home / 'gateway_state.json').read_text())
+            assert state['gateway_state'] == 'draining'
+            evidence.append({'pid': proc.pid, 'epoch': desc['authority_epoch'], 'rows': rows()})
+        clear_drain_request(home=home)
         for _ in range(2):
             with daemon(root, home, env, barrier=False) as (proc, desc):
                 asyncio.run(settled())
