@@ -238,8 +238,9 @@ def _build_child_agent(
     from run_agent import AIAgent
     from agent.delegation_context import delegated_child_context
     from tools.delegate_tool_routes import delegated_profile_scope
-    from tools.delegate_tool_boundary import supplied_context_only, constrain_child
-    context_only = supplied_context_only(profile_home)
+    from tools.delegate_tool_boundary import child_tool_ceiling, constrain_child
+    ceiling = child_tool_ceiling(profile_home, parent_agent)
+    context_only = ceiling is not None
     # Role is depth-derived: a child may delegate iff the kill switch is on and
     # depth budget remains below max_spawn_depth. The `role` arg is ignored.
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
@@ -259,7 +260,7 @@ def _build_child_agent(
     delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
     if context_only:
-        child_toolsets = ['no_mcp']
+        child_toolsets = ['no_mcp', 'web'] if ceiling else ['no_mcp']
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=None if context_only else _resolve_workspace_hint(parent_agent), role=effective_role,
         max_spawn_depth=max_spawn, child_depth=child_depth,
@@ -328,7 +329,7 @@ def _build_child_agent(
                         release_or_close(child_session_db)
                 raise
         if context_only:
-            constrain_child(child)
+            constrain_child(child, ceiling)
         # Shared pool lets children rotate credentials on rate limits. A profile child loads ITS profile's pool
         # (inside the scope) and never shares the launching parent's.
         child_pool = _resolve_child_credential_pool(

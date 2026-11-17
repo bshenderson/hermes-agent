@@ -2522,10 +2522,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                  skip_tool_request_middleware: bool = False,
                  tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None,
                  skip_tool_execution_middleware: bool = False) -> str:
-    """Invoke a single tool (agent-level or registry-dispatched) and return the result string;
-    no display logic. Used by the concurrent path; the sequential path keeps its own inline
-    invocation for display."""
-    if getattr(agent, '_delegation_context_only', False) is True:
+    """Invoke an inline/registry tool without display; the sequential path owns its display."""
+    from tools.delegate_tool_boundary import child_tool_denied
+    if child_tool_denied(agent, function_name):
         return json.dumps({'error': 'tool_denied_for_supplied_context_child'})
     from agent.inline_tool_executors import (
         InlineToolContext, apply_transform_tool_result, emit_terminal_post_tool_call,
