@@ -21,6 +21,18 @@ def bind_work_sample_owner(runner):
     bind_owner(runner, runner._work_sample_loop, runner._work_sample_context)
 
 
+async def refresh_work_samples(runner):
+    """Recount idle owners too; stale counts must never gain a fresh timestamp."""
+    loop = asyncio.get_running_loop()
+    while runner._running and runner._work_sample_loop is loop:
+        await asyncio.sleep(5.0)
+        if not runner._running or runner._work_sample_loop is not loop:
+            return
+        # Supervision starts with an empty Context. Publication belongs to the
+        # launch owner captured at startup, not a routed turn or ambient home.
+        runner._work_sample_context.copy().run(publish_work_sample, runner)
+
+
 def _best_effort_count(read):
     try:
         return read(), True

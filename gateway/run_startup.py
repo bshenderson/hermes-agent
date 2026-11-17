@@ -1658,6 +1658,8 @@ class GatewayStartupMixin:
 
     def _start_spawn_background_watchers(self) -> None:
         """Spawn the long-lived supervised background watchers."""
+        from gateway.run_work_sample import refresh_work_samples
+        self._spawn_supervised(lambda: refresh_work_samples(self), "work_sample_refresh")
         for method in self._PRE_RECONNECT_WATCHERS:
             self._spawn_supervised(getattr(self, method), method[1:])
         if self._failed_platforms:
