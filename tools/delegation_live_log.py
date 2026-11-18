@@ -303,6 +303,8 @@ def update_manifest_statuses(delegation_id: Optional[str],
                     task["exit_reason"] = r["exit_reason"]
                 if r.get("model"):
                     task["model"] = r["model"]
+                if isinstance(r.get("execution_manifest"), dict):
+                    task["execution_manifest"] = json.loads(_redact(json.dumps(r["execution_manifest"])))
         # The dispatch-time model is only the delegation.model override (None when children inherit the parent's).
         if not manifest.get("model"):
             manifest["model"] = next((t["model"] for t in manifest.get("tasks", []) if t.get("model")), None)

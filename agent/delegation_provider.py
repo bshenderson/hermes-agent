@@ -27,6 +27,9 @@ Route vocabulary (:meth:`DelegationProvider.route_task` returns a dict with any 
   scope helpers a multiplexed gateway uses for a routed turn. A profile route ignores the other
   route keys; the profile's own config decides them.
 * ``label`` - short text shown with the child's progress and result (e.g. the option title).
+* ``execution_identity`` - optional provider-observed selector, native_model,
+  route_epoch, epoch_kind and context_length. Core allowlists this metadata for
+  reporting; it is not proof of native execution or authority to change profiles.
 
 A backend's own settings live under ``delegation.backends.<backend name>`` (:meth:`DelegationProvider.settings`),
 never beside the core ``delegation`` keys.
@@ -51,6 +54,7 @@ RESERVED_TASK_PARAMETERS = frozenset({
 ROUTE_KEYS = frozenset({
     "model", "provider", "base_url", "api_key", "api_mode", "request_overrides",
     "reasoning_effort", "service_tier", "fallback_providers", "profile", "label",
+    "execution_identity",
 })
 
 

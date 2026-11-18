@@ -39,6 +39,7 @@ class TaskRoute:
     label: Optional[str] = None
     backend: str = "default"
     error: Optional[str] = None
+    requested: Optional[dict[str, Any]] = None
 
     def report(self) -> Optional[dict[str, Any]]:
         """The ``route`` a backend-routed task's result carries (None for the default backend's unlabelled route)."""
@@ -249,7 +250,8 @@ def _route_to_task_route(route: dict[str, Any], parent_agent: Any, cache: dict[s
     key = json.dumps({k: v for k, v in route.items() if k != "label"}, sort_keys=True, default=str)
     if key not in cache:
         cache[key] = _resolve_route(route, parent_agent, backend)
-    return replace(cache[key], label=label)
+    return replace(cache[key], label=label,
+                   requested={k: route.get(k) for k in ("model", "provider", "profile")})
 
 
 def _check_backend_effort(index: int, route: Mapping[str, Any], config: Mapping[str, Any]) -> None:

@@ -69,28 +69,34 @@ def _truncate_stdout_text(stdout_text: str) -> tuple[str, dict[str, Any]]:
             + truncation_notice(total - captured, total, unit="bytes")
             + stdout_bytes[-tail_bytes:].decode("utf-8", errors="replace"))
     metadata["warning"] = ("execute_code stdout was truncated; the script did run, but only "
-                           "the captured head/tail output is included. Re-run only with "
-                           "narrower output if the omitted data is required.")
-    spill_path = _spill_full_stdout(stdout_text)
+                           "the captured head/tail output is available. Spill storage failed; "
+                           "do not replay side effects to recover omitted output.")
+    # Cap encoded bytes, without persisting a partial UTF-8 character or a marker
+    # masquerading as original stdout. Loss belongs in the delivery metadata.
+    spill_text = stdout_bytes[:MAX_SPILLED_STDOUT_BYTES].decode("utf-8", errors="ignore")
+    spill_bytes = len(spill_text.encode("utf-8"))
+    spill_path = _spill_full_stdout(spill_text)
     if spill_path:
         metadata["stdout_spill_path"] = spill_path
+        metadata["stdout_spill_complete"] = spill_bytes == total
+        metadata["stdout_spill_bytes"] = spill_bytes
+        metadata["stdout_spill_bytes_omitted"] = total - spill_bytes
+        extent = "FULL output" if spill_bytes == total else f"PARTIAL output ({total - spill_bytes} bytes not retained)"
         metadata["warning"] = ("execute_code stdout was truncated (head/tail shown); the "
-                               f"script did run. FULL output saved to {spill_path} — page it "
+                               f"script did run. {extent} saved to {spill_path} — page it "
                                f'with read_file(path="{spill_path}", offset=...) instead of re-running.')
     return text, metadata
 
 
 def _spill_full_stdout(stdout_text: str) -> Optional[str]:
-    """Write full stdout to cache/exec; return its path (None on failure — best-effort,
+    """Write byte-bounded stdout to cache/exec; return its path (None on failure — best-effort,
     the truncated inline output is still returned). Keyed by content digest so identical
     reruns coalesce; the dir rides the cache/web remote bind-mount list (credential_files)."""
     try:
         import hashlib
         from hermes_constants import get_hermes_dir
         from tools.spill_safety import write_text_exclusive
-        if len(stdout_text) > MAX_SPILLED_STDOUT_BYTES:
-            stdout_text = (stdout_text[:MAX_SPILLED_STDOUT_BYTES]
-                           + f"\n\n[... spill capped at {MAX_SPILLED_STDOUT_BYTES:,} bytes ...]")
+
         cache_dir = get_hermes_dir("cache/exec", "exec_spill")
         cache_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(stdout_text.encode("utf-8", errors="replace")).hexdigest()[:12]

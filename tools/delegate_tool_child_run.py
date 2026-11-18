@@ -95,6 +95,8 @@ def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: f
         "task_index": idx, "status": status, "summary": None, "error": error, "api_calls": 0,
         "duration_seconds": duration, "_child_role": getattr(child, "_delegate_role", None),
     }
+    from tools.delegate_execution_manifest import report
+    entry.update(report(child))
     route = _route_report(child)
     if route is not None:
         entry["route"] = route
@@ -588,6 +590,8 @@ def _build_tool_trace(messages: Any) -> list[dict[str, Any]]:
     tool calls with their results by tool_call_id."""
     tool_trace: list[dict[str, Any]] = []
     trace_by_id: dict[str, dict[str, Any]] = {}
+    seen_calls: set[tuple[str, str, str]] = set()
+    ambiguous_ids: set[str] = set()
     if not isinstance(messages, list):
         return tool_trace
     for msg in messages:
@@ -597,10 +601,22 @@ def _build_tool_trace(messages: Any) -> list[dict[str, Any]]:
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function", {})
                 arguments = fn.get("arguments", "")
+                tc_id = tc.get("id")
+                if tc_id:
+                    identity = (tc_id, fn.get("name", "unknown"),
+                                json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+                    if identity in seen_calls:
+                        continue  # repeated persisted row, not another unique call
+                    seen_calls.add(identity)
+                    if tc_id in trace_by_id:
+                        ambiguous_ids.add(tc_id)
+                        trace_by_id[tc_id]["identity_conflict"] = True
                 entry_t = {
                     "tool": fn.get("name", "unknown"), "args_bytes": len(arguments),
                     "input_summary": _summarize_tool_arguments(arguments),
                 }
+                if tc_id in ambiguous_ids:
+                    entry_t["identity_conflict"] = True
                 tool_trace.append(entry_t)
                 if tc.get("id"):
                     trace_by_id[tc["id"]] = entry_t
@@ -608,10 +624,10 @@ def _build_tool_trace(messages: Any) -> list[dict[str, Any]]:
             content = _stringify_tool_content(msg.get("content", ""))
             result_meta = {"result_bytes": len(content), "status": "error" if _looks_like_error_output(content) else "ok"}
             tc_id = msg.get("tool_call_id")
-            target = trace_by_id.get(tc_id) if tc_id else None
+            target = trace_by_id.get(tc_id) if tc_id and tc_id not in ambiguous_ids else None
             if target is not None:
                 target.update(result_meta)
-            elif tool_trace:
+            elif not tc_id and tool_trace:
                 tool_trace[-1].update(result_meta)  # no tool_call_id: pair with the latest call
     return tool_trace
 
@@ -694,6 +710,8 @@ def _build_result_entry(
             entry["failure_reason"] = "guardrail_halt"
             if isinstance(result.get("guardrail"), dict):
                 entry["guardrail"] = dict(result["guardrail"])
+    from tools.delegate_execution_manifest import report
+    entry.update(report(child))
     _route = _route_report(child)
     if _route is not None:
         entry["route"] = _route
@@ -839,9 +857,11 @@ class _ChildRun:
         self.child_task_id = self.subagent_id or f"subagent-{self.task_index}-{_uuid.uuid4().hex[:8]}"
         self.parent_task_id = getattr(self.parent_agent, "_current_task_id", None)
         from tools.delegate_tool_boundary import isolated_child
+        from tools.delegate_execution_manifest import capture_workspace
         if isolated_child(self.child):
             self.parent_task_id = None
             self.wall_start = time.time()
+            capture_workspace(self.child, self.child_task_id, isolated=True)
             return
         # Seed the child's cwd record from the parent's: same starting directory,
         # but the child's later `cd`s stay in its own record. Per-session container
@@ -850,8 +870,11 @@ class _ChildRun:
         # are keyed by the active profile, and a profile-routed child looks its own up as that profile).
         from tools.delegate_tool_routes import child_profile_scope
         with _quiet("Child cwd seed failed: %s"):
+            from tools.delegate_tool_progress import _resolve_workspace_hint
             from tools.terminal_tool import get_session_cwd, record_session_cwd, register_container_alias
-            parent_cwd = get_session_cwd(self.parent_task_id)
+            # A newly opened session may not have run a terminal command yet.
+            # Bind its explicit workspace, not the profile/process fallback.
+            parent_cwd = get_session_cwd(self.parent_task_id) or _resolve_workspace_hint(self.parent_agent)
             with child_profile_scope(self.child):
                 record_session_cwd(self.child_task_id, parent_cwd)
             register_container_alias(self.child_task_id, self.parent_task_id)
@@ -867,6 +890,7 @@ class _ChildRun:
             self.goal = self.goal + build_worktree_context_note(self.worktree_info)
         self.wall_start = time.time()
         self.parent_reads_snapshot = list(file_state.known_reads(self.parent_task_id)) if self.parent_task_id else []
+        capture_workspace(self.child, self.child_task_id, worktree=self.worktree_info is not None)
 
     def finish_failed(
         self, entry: dict[str, Any], late_steer: Optional[str], *, preview: str, summary: str = "", status: Optional[str] = None,
