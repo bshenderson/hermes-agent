@@ -221,8 +221,9 @@ def _build_child_system_prompt(
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
     """Best-effort local workspace hint for child prompts: only a concrete
     absolute directory is ever injected (never a fake container path)."""
-    from agent.runtime_cwd import scope_terminal_cwd
+    from agent.runtime_cwd import scope_terminal_cwd, scoped_session_cwd
     candidates = [
+        scoped_session_cwd(),
         scope_terminal_cwd(), getattr(getattr(parent_agent, "_subdirectory_hints", None), "working_dir", None),
         getattr(parent_agent, "terminal_cwd", None), getattr(parent_agent, "cwd", None),
     ]

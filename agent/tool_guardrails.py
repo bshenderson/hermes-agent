@@ -350,7 +350,8 @@ _DECISION_MESSAGES: dict[str, str] = {
     ),
     "loop_execute_code_cap": (
         "Blocked execute_code: this turn has already made {cap} execute_code calls. "
-        "This looks like a runaway code-execution loop. Use the results already available, switch tools, or explain the blocker."
+        "The per-turn execution budget is exhausted; this does not establish repeated calls or lack of progress. "
+        "Use the results already available or report the budget constraint."
     ),
 }
 
@@ -739,7 +740,7 @@ class ToolCallGuardrailController:
             return None
         cap_field, count_attr, code = spec
         cap, count = getattr(self.config.loop_caps, cap_field), getattr(self, count_attr)
-        increment = 1 if tool_name == "web_search" else (_subagent_spawn_count(args) if cap else 0)
+        increment = _subagent_spawn_count(args) if tool_name == "delegate_task" else 1
         if increment and cap and count >= cap:
             return self._decide("block", code, tool_name, count, signature, cap=cap)
         setattr(self, count_attr, count + increment)
