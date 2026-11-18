@@ -25,6 +25,24 @@ Malformed messaging routes still produce diagnostics. On the API server, an asyn
 completion adds a durable timeline delivery row only: the client owns the next model turn.
 Setting background process notifications to `off` still drains pattern-watch events silently.
 
+## Execution accounting
+
+Child results include `execution_accounting`, an observational summary rather than
+a hard-budget ledger. `api_calls` is the reported API count;
+`transcript_tool_calls` counts retained tool-call entries after identified repeats
+are collapsed. Neither establishes physical dispatch or artifact acceptance.
+`nested_tool_calls_reported` sums valid, identified `execute_code` receipt counts
+only. Read it with `execute_code_receipts_observed` and
+`execute_code_receipts_unknown`: missing, malformed, unidentified or conflicting
+receipts do not establish zero nested work. Explicit zero-call refusals remain zero.
+No tool input or output prose is copied into this summary.
+
+`elapsed_seconds` retains the existing total duration. `pending_seconds` and
+`execution_seconds` are null because the pending/execution split is not instrumented;
+configured timeouts and aggregate elapsed time must not be substituted for it.
+An unavailable transcript or API count remains null. Existing limits and retry
+behavior are unchanged.
+
 ## Background process lifetime
 
 Background terminal processes belong to the agent that starts them. Closing a child during delegation teardown terminates its remaining processes, including work started in earlier turns, without stopping processes owned by the parent or sibling agents. Sharing a terminal environment does not transfer process ownership.

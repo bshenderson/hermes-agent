@@ -626,6 +626,8 @@ def _build_tool_trace(messages: Any) -> list[dict[str, Any]]:
             tc_id = msg.get("tool_call_id")
             target = trace_by_id.get(tc_id) if tc_id and tc_id not in ambiguous_ids else None
             if target is not None:
+                from tools.delegate_accounting import record_receipt
+                record_receipt(target, content)
                 target.update(result_meta)
             elif not tc_id and tool_trace:
                 tool_trace[-1].update(result_meta)  # no tool_call_id: pair with the latest call
@@ -692,6 +694,10 @@ def _build_result_entry(
         "_child_role": getattr(child, "_delegate_role", None),
         "_child_cost_usd": float(_cost or 0.0) if isinstance(_cost, (int, float)) else 0.0,
     }
+    from tools.delegate_accounting import summarize
+    entry["execution_accounting"] = summarize(
+        entry["tool_trace"] if isinstance(result.get("messages"), list) else None,
+        result.get("api_calls"), duration)
     # Model-visible per-delegation spend (unlike _child_cost_usd above).
     entry["cost_usd"] = round(entry["_child_cost_usd"], 6)
     entry["cost_status"] = _cost_status if isinstance(_cost_status, str) and _cost_status else "unknown"
@@ -837,6 +843,10 @@ class _ChildRun:
 
     def attach_worktree(self, entry_dict: dict[str, Any]) -> dict[str, Any]:
         """Inspect + prune the child worktree, reporting into the entry (no-op without isolation)."""
+        if "execution_accounting" not in entry_dict:
+            from tools.delegate_accounting import summarize
+            entry_dict["execution_accounting"] = summarize(
+                entry_dict.get("tool_trace"), None, entry_dict.get("duration_seconds"))
         info = self.worktree_info
         if info is None:
             return redact_child_result(entry_dict, getattr(self.child, "_delegate_output_schema", None), force=False)
