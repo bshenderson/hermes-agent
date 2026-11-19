@@ -425,6 +425,8 @@ def _run_single_child(
     _child_close_deferred = False
     try:
         heartbeat.start()
+        from tools.delegate_resource_gate import install_child_gate
+        install_child_gate(child, _load_config())
         _safe_progress(child_progress_cb, "subagent.start", preview=goal)
         run.seed_workspace()
         result, failure_entry, _child_close_deferred = run.await_child()
@@ -440,6 +442,8 @@ def _run_single_child(
 
         duration = run.elapsed()
         entry = _build_result_entry(child, result, task_index, duration, schema)
+        if getattr(child, "_delegate_capacity", None):
+            entry["capacity"] = dict(child._delegate_capacity)
         run.append_sibling_write_reminder(entry)
         run.account_background_processes(entry)
         run.emit_complete(result, entry, duration)
