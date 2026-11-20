@@ -469,6 +469,9 @@ class MemoryManager:
         (tool outputs included) go through ``_redact_for_provider`` so secrets are never archived
         verbatim in a provider's store (#115104).
         """
+        from agent.memory_input_scope import automatic_memory_input
+        if automatic_memory_input():
+            return
         if self._fork_turn_hooks_suppressed():
             return
         providers = list(self._providers)

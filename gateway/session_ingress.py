@@ -410,8 +410,13 @@ def _launch_body_if_launch_owner(authority):
 async def _admission_scope(authority, home, row, event, captured):
     """The execution scope, inside the adapter lifecycle the executor owns for a producer-admitted
     turn (``session_producer_lifecycle``; a no-op for every other admission)."""
+    from agent.memory_input_scope import memory_input_scope
+    from gateway.session_automation import is_memory_notification
+    # Recipient identity is not completion authorship. Use the durable producer
+    # identity: notification_origin is debug-only and disappears on restoration.
+    automatic = event.internal is True and is_memory_notification(row)
     async with producer_turn(authority, row, event, captured):
-        with await _execution_scope(authority, home):
+        with await _execution_scope(authority, home), memory_input_scope(automatic=automatic):
             yield
 
 

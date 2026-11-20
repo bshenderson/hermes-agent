@@ -212,6 +212,17 @@ def _descriptor(payload):
     return payload.get('local_automation_v1') or (payload.get('native_text_v1') or {}).get('automation') or {}
 
 
+def is_memory_notification(row):
+    """Only admitted process/delegation notices, never authored bot chat or user text."""
+    descriptor = _descriptor(row['payload'])
+    if not descriptor or not row['principal_id'].startswith('automation:'):
+        return False
+    identities = _identities([descriptor.get('identity')])
+    return bool(len(identities) == 1 and len(identities[0]) == 3
+                and identities[0][0] in {'async_delegation', 'completion', 'watch_match', 'watch_disabled', 'heartbeat'}
+                and descriptor['identity'] == row['request_id'])
+
+
 def _tick_metadata(metadata):
     """A liveness tick's stored output (``heartbeat_tick``): what a later tick folds in."""
     tick = metadata.get('heartbeat_tick')
