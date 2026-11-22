@@ -301,15 +301,15 @@ _DECISION_MESSAGES: dict[str, str] = {
     ),
     "loop_web_search_cap": (
         "Blocked web_search: this turn has already made {cap} web searches, the per-turn limit. "
-        "This looks like a runaway search loop. Work with the results you already have and give the user your answer."
+        "This is a cumulative usage limit, not a finding of repeated failure. Work with the retained results or explain the remaining scope."
     ),
     "loop_subagent_cap": (
         "Blocked delegate_task: this turn has already spawned {count} subagents (limit {cap}). "
-        "This looks like a runaway delegation loop. Finish the work with the results you have and answer the user."
+        "This is a cumulative usage limit, not a finding of repeated failure. Work with the retained results or explain the remaining scope."
     ),
     "loop_execute_code_cap": (
         "Blocked execute_code: this turn has already made {cap} execute_code calls. "
-        "This looks like a runaway code-execution loop. Use the results already available, switch tools, or explain the blocker."
+        "This is a cumulative usage limit, not a finding of repeated failure. Use the retained results or explain the remaining scope."
     ),
 }
 
@@ -326,6 +326,19 @@ _LOOP_CAPS: dict[str, tuple[str, str, str]] = {
     "delegate_task": ("max_subagents", "_turn_subagent_count", "loop_subagent_cap"),
     "execute_code": ("max_execute_code_calls", "_turn_execute_code_count", "loop_execute_code_cap"),
 }
+
+
+def controlled_halt_response(decision: ToolGuardrailDecision) -> str:
+    """Report the measured cause, not an inferred failure/progress history."""
+    cumulative = decision.code in {entry[2] for entry in _LOOP_CAPS.values()}
+    cause = (f"The per-turn budget for {decision.tool_name or 'the tool'} was reached "
+             f"(cumulative usage: {decision.count})." if cumulative else
+             decision.message or f"The {decision.tool_name or 'tool'} guardrail stopped this turn.")
+    impact = ("The limit counts cumulative usage; it does not establish a retry loop or repeated failure."
+              if cumulative else "Further execution on this blocked path has stopped.")
+    return (f"Outcome:\n{cause}\n\nImpact:\n{impact}\n\n"
+            "Caveats/blockers:\nTask completion is not established by this stop.\n\n"
+            "Next step:\nUse the retained results to resume with a changed approach or a smaller scope.")
 
 
 class ToolCallGuardrailController:

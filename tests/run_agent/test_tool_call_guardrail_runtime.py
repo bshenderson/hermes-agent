@@ -459,7 +459,7 @@ def test_web_search_synthesis_redirect_ends_turn_instead_of_looping():
     assert mock_hfc.call_count == 4
     assert result["turn_exit_reason"] == "guardrail_halt"
     assert result["guardrail"]["code"] == "web_search_synthesis_redirect"
-    assert "stopped retrying" in result["final_response"]
+    assert "Stop broad searching" in result["final_response"]
 
 
 def test_execute_code_semantic_http_error_counts_as_tool_failure():
@@ -546,7 +546,7 @@ def test_guardrail_halt_emits_final_response_through_stream_delta_callback():
 
     assert result["turn_exit_reason"] == "guardrail_halt"
     halt_text = result["final_response"]
-    assert "stopped retrying" in halt_text
+    assert "identical arguments" in halt_text
 
     # The halt message must have been pushed through the callback at least
     # once.  Empty-queue SSE writers were the bug — clients saw no content

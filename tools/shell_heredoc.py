@@ -18,6 +18,11 @@ _INERT_HEREDOC_CONSUMER_RE = re.compile(
     r"(?:python(?:3(?:\.\d+)*)?|osascript|cat)(?=\s|$)",
     re.IGNORECASE)
 
+# A literal directory change cannot execute the following interpreter's input.
+# Keep all other lists/expansions conservative, including shell consumers.
+_LITERAL_CD_PREFIX_RE = re.compile(
+    r"^\s*cd\s+(?:--\s+)?(?:[A-Za-z0-9_./~-]+|'[^'\n$`\\]*'|\"[^\"\n$`\\]*\")\s*&&\s*")
+
 
 def _span_end(command: str, cursor: int, closer: str) -> int:
     """Index just past the backslash-aware span opened at ``cursor``."""
@@ -187,8 +192,15 @@ def strip_inert_heredoc_bodies(command: str) -> str:
                 return command  # unterminated
             body_ranges.append((body_cursor, close_end))
             body_cursor = close_end
+        opener = command[command_start:command_end]
+        prefix = _LITERAL_CD_PREFIX_RE.match(opener)
+        if prefix:
+            opener = opener[prefix.end():]
+            _end, tail_specs, tail_unknown, tail_list = _scan_heredoc_command_unit(opener, 0)
+            if not tail_unknown and tail_specs == specs:
+                has_list_operator = tail_list
         if all(quoted for _delimiter, _strip_tabs, quoted in specs) and not has_list_operator:
-            masked_opener = _mask_simple_quotes(command[command_start:command_end])
+            masked_opener = _mask_simple_quotes(opener)
             if (not any(m in masked_opener for m in ("$(", "`", "<(", ">("))
                     and _INERT_HEREDOC_CONSUMER_RE.search(masked_opener)):
                 ranges.extend(body_ranges)
