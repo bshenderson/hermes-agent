@@ -109,10 +109,38 @@ supplied goal/context. Removing implicit inheritance does not redact a private
 fact that the parent explicitly copies into that brief, and this is not an OS
 sandbox or a replacement for authenticated profile authorization.
 
-The only supported explicit value is `supplied_context_only`; another value
-refuses construction. Omit the key to preserve legacy behavior. Unprofiled and
-unenrolled children keep their existing inheritance contract. This first policy
-intentionally grants zero tools, not a configurable nonempty capability ceiling.
+Omit the key to preserve legacy behavior. Unprofiled and unenrolled children
+keep their existing inheritance contract. Unknown explicit policies refuse
+construction. `supplied_context_only` always grants zero tools, even if a
+`child_tool_ceiling` is also configured.
+
+### Opt-in bounded retrieval profile children
+
+A separate target policy retains the same non-inheritance and leaf restrictions
+but permits a captured subset of the native retrieval tools:
+
+```yaml
+delegation:
+  child_boundary: bounded_tools
+  child_tool_ceiling: [web_search, web_extract]
+```
+
+The immutable per-child ceiling intersects this target list with the parent's
+actual carried session schemas and valid tool names, not its configured toolsets
+or model-authored task parameters. Only `web_search` and `web_extract` are
+supported. Missing or empty lists grant nothing; malformed lists and unsupported
+names refuse construction. Deferred parent capabilities are not inferred from
+global availability. A tool must already be authorized on the parent surface.
+
+Construction, fresh schemas, refresh merges, middleware and direct invocation
+enforce that same ceiling. Nested delegation, discovery bridges, terminal,
+workspace and memory tools cannot be recovered by requesting broader toolsets.
+Target availability can further narrow the exposed tools. Retrieval uses the
+target profile's normal provider scope, not the parent's personal credentials;
+operators must provision and qualify that target independently. The native web
+tools retain their own URL-safety policy. This is a capability boundary, not a
+new network sandbox, live deployment grant or guarantee about model-authored
+briefs. Existing lifecycle and result-delivery owners are unchanged.
 
 This means the parent agent must pass **everything** the subagent needs in the call:
 

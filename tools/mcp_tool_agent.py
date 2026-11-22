@@ -69,8 +69,10 @@ def _tool_defs_content_changed(agent, new_defs: list) -> bool:
 def _drop_session_tools(agent, new_defs: list, new_names: set) -> tuple:
     # Drops only: runs after a merge, where a carried or pinned entry keeps the bytes already sent. The one-shot
     # schema variants (``toolsets.agent_tool_surface``) shape fresh definitions, before any merge.
-    if getattr(agent, '_delegation_context_only', False) is True:
-        return [], set()
+    from tools.delegate_tool_boundary import filter_child_tools, isolated_child
+    if isolated_child(agent):
+        new_defs = filter_child_tools(agent, new_defs)
+        new_names = new_names & {_def_name(entry) for entry in new_defs}
     from toolsets import agent_tool_drops
     drops = agent_tool_drops(agent)
     if not drops:

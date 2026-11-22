@@ -838,7 +838,8 @@ class _ChildRun:
         import uuid as _uuid
         self.child_task_id = self.subagent_id or f"subagent-{self.task_index}-{_uuid.uuid4().hex[:8]}"
         self.parent_task_id = getattr(self.parent_agent, "_current_task_id", None)
-        if getattr(self.child, '_delegation_context_only', False) is True:
+        from tools.delegate_tool_boundary import isolated_child
+        if isolated_child(self.child):
             self.parent_task_id = None
             self.wall_start = time.time()
             return

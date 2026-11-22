@@ -766,7 +766,8 @@ def _run_agent_tool_execution_middleware(
     authorization_gate: _ConcurrentToolAuthorizationGate | None = None,
 ) -> _ManagedToolResult:
     """Run Relay rewrites before Hermes policy and dispatch exactly once."""
-    if getattr(agent, '_delegation_context_only', False) is True:
+    from tools.delegate_tool_boundary import child_tool_denied
+    if child_tool_denied(agent, function_name):
         return _ManagedToolResult(
             result=json.dumps({'error': 'tool_denied_for_supplied_context_child'}), args=function_args,
             middleware_trace=[], blocked=True, dispatched=False)
