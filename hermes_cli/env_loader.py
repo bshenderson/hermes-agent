@@ -194,7 +194,7 @@ def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, 
 
 
 def resolve_profile_secret_names(
-    hermes_home: str | os.PathLike, names: Sequence[str]
+    hermes_home: str | os.PathLike, names: Sequence[str], *, mapped_only: bool = False
 ) -> dict[str, str]:
     """GXTD-819 per-job hydration: resolve ONLY ``names`` against the profile's configured
     sources, STRICTLY and freshly — no caching and no cache writes at all (never
@@ -213,14 +213,14 @@ def resolve_profile_secret_names(
     requested = frozenset(str(name) for name in names)
     if not requested:
         return {}
-    report, local_env = _resolve_profile_secret_env(Path(hermes_home), requested)
+    report, local_env = _resolve_profile_secret_env(Path(hermes_home), requested, mapped_only=mapped_only)
     if report is None or local_env is None:
         return {}
     return _applied_values(report, local_env)
 
 
 def _resolve_profile_secret_env(
-    home: Path, only_names: Optional[frozenset[str]] = None,
+    home: Path, only_names: Optional[frozenset[str]] = None, *, mapped_only: bool = False,
 ) -> tuple[Optional[ApplyReport], Optional[dict[str, str]]]:
     """One private resolve against a seeded mapping (never ``os.environ``); returns
     ``(ApplyReport|None, local_env|None)`` — None/None on any config/fetch guard trip.
@@ -237,6 +237,11 @@ def _resolve_profile_secret_env(
         return None, None
     try:
         cfg = _load_secrets_config(home)
+        if mapped_only:
+            cfg = {k: v for k, v in cfg.items() if k in ('onepassword', 'preserve_existing', 'profile_alias')}
+        elif only_names is None and cfg.get('lazy') is True:
+            from agent.lazy_secrets import startup_config
+            cfg, _required = startup_config(cfg)
     except Exception:
         return None, None
     if not cfg:
@@ -256,6 +261,23 @@ def _resolve_profile_secret_env(
         if op_env.exists():
             for _name, _value in load_env_file(op_env).items():
                 local_env.setdefault(_name, _value)
+        if mapped_only and home.resolve() == _process_hermes_home().resolve():
+            # Launch-profile lazy reads must retain the exact bootstrap auth
+            # already selected by dotenv/process startup. Foreign scopes never
+            # inherit these process credentials, nor unrelated provider keys.
+            from agent.secret_sources.onepassword import OnePasswordSource, _OP_ENV_ALLOWLIST
+            auth_names: set[str] = set(_OP_ENV_ALLOWLIST)
+            auth_names.add('OP_SERVICE_ACCOUNT_TOKEN')
+            auth_names.add(OnePasswordSource().token_env(cfg.get('onepassword', {})))
+            auth_names.update(name for name in local_env.keys() | os.environ.keys()
+                              if name.startswith('OP_SESSION_'))
+            for name in auth_names:
+                if name in os.environ:
+                    local_env[name] = os.environ[name]
+                else:
+                    # Absence is part of the selected identity too: startup may
+                    # have deliberately skipped .op.env because a token exists.
+                    local_env.pop(name, None)
         local_env["HERMES_HOME"] = str(home)
         from hermes_cli.config_backend import get_config_backend
 
@@ -832,6 +854,8 @@ def load_hermes_dotenv(
     # updater process or the self-lock preflight will recreate the marker and exit 2 again. Dotenv and
     # managed env still load in both cases; only external source resolution is unnecessary for the updater.
     if load_external_secrets and not _early_recovery._should_skip_external_secret_sources():
+        from hermes_cli import startup_budget
+        startup_budget.stage('secrets')
         _apply_external_secret_sources(home_path)
     _apply_managed_env(load_pass=load_pass)
 
@@ -984,7 +1008,7 @@ def _publish_staged_env(staged: dict, environ_before: dict) -> None:
 
 def _apply_external_secret_sources(home_path: Path) -> None:
     """Pull secrets from every enabled external source into env — AFTER dotenv (sources need .env bootstrap
-    tokens), BEFORE Hermes reads credentials; failures never block startup. Precedence/conflicts/provenance
+    tokens), BEFORE Hermes reads credentials; required lazy-surface failures block startup. Precedence/conflicts/provenance
     live in ``registry.apply_all``; this wrapper owns the once-per-home guard, the post-apply ASCII sweep,
     the ``_SECRET_SOURCES`` map and status lines."""
     home_key = str(Path(home_path).resolve())
@@ -994,13 +1018,17 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     # Neither early return marks the home applied: a malformed config.yaml would otherwise permanently
     # disable secret loading for this process, and an unmarked home picks up a config change on the next
     # load (the signature-cached read is cheap).
+    required_names = frozenset()
     try:
-        cfg = _load_secrets_config(home_path)
+        cfg = _load_secrets_config(home_path, strict=True)
     except Exception:
-        # See #40597.
-        return
-    # No source configured / enabled any more: whatever one wrote earlier is no longer backed (#126982
-    # review). A config READ failure above keeps them — fail-open, same as the fetch-failure path below.
+        from agent.lazy_secrets import SecretUnavailable
+        raise SecretUnavailable('secret configuration unavailable; no credential fallback') from None
+    if cfg.get('lazy') is True:
+        from agent.lazy_secrets import startup_config
+        cfg, required_names = startup_config(cfg)
+    # No source configured / enabled any more: whatever one wrote earlier is no longer backed.
+    # Configuration read failures above refuse rather than infer an absent policy.
     if not cfg:
         _revoke_secret_source_writes(home_path, keep=lambda _name, _source: False)
         return
@@ -1016,6 +1044,9 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     try:
         from agent.secret_sources.registry import apply_all, enabled_source_names
     except ImportError:
+        if required_names:
+            from agent.lazy_secrets import SecretUnavailable
+            raise SecretUnavailable('required startup credential unavailable; no credential fallback') from None
         return
 
     # Revoke a removed/disabled source's writes BEFORE the pass: left in place, its stale value would make
@@ -1039,8 +1070,14 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     try:
         report = apply_all(cfg, home_path, environ=staged)
     except Exception:
+        if required_names:
+            from agent.lazy_secrets import SecretUnavailable
+            raise SecretUnavailable('required startup credential unavailable; no credential fallback') from None
         return
 
+    if required_names - set(report.provenance):
+        from agent.lazy_secrets import SecretUnavailable
+        raise SecretUnavailable('required startup credential unavailable; no credential fallback')
     if not report.sources:  # no source enabled: keep retrying cheaply so flipping one on takes effect
         return
     _refuse_protected_env_from_sources(report, backend_before, environ_before, env=staged)
@@ -1129,13 +1166,25 @@ def _remediation_hint(source_name: str, error_kind, secrets_cfg: dict, *, scope:
         return ""
 
 
-def _load_secrets_config(home_path: Path) -> dict:
+def _load_secrets_config(home_path: Path, *, strict: bool = False) -> dict:
     """Read just the ``secrets:`` section of config.yaml, isolated so a malformed config can't break dotenv."""
     from hermes_cli.config_backend import config_exists, read_config_doc_readonly
 
     config_path = home_path / "config.yaml"
     if not config_exists(config_path):
         return {}
+    if strict:
+        # Startup/credential reads cannot infer 'no policy' from malformed or
+        # inaccessible configuration. Legacy inspection callers remain tolerant.
+        from agent.lazy_secrets import SecretUnavailable
+        try:
+            data = read_config_doc_readonly(config_path) or {}
+            section = data.get('secrets') or {}
+            if not isinstance(section, dict):
+                raise ValueError('invalid secret configuration shape')
+            return section
+        except Exception:
+            raise SecretUnavailable('secret configuration unavailable; no credential fallback') from None
     # Prefer the shared raw-config cache: this is the first config.yaml read of a normal startup, so
     # populating it lets main.py's early bridge and hermes_logging reuse one parse instead of 3-4.
     if home_path == _process_hermes_home():

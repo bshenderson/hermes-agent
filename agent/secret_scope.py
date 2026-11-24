@@ -241,6 +241,11 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
         return _environ_or(name, default)
     bound = _SECRET_SCOPE.get()
     if bound is not None:
+        from agent.lazy_secrets import resolve
+        from hermes_constants import get_hermes_home
+        handled, value = resolve(Path(bound.profile_home) if bound.profile_home else get_hermes_home(), name)
+        if handled:
+            return value
         val = bound.mapping.get(name)
         if val is not None:
             return val
@@ -256,9 +261,12 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
             f"set_secret_scope(...) block (the per-turn / per-adapter profile "
             f"scope). Reading os.environ here would risk leaking another "
             f"profile's value. See website/docs/developer-guide/multiplexing-gateway.md "
-            f"(Workstream A).",
+            "(Workstream A).",
         )
-    return _environ_or(name, default)
+    from agent.lazy_secrets import resolve
+    from hermes_constants import get_hermes_home
+    handled, value = resolve(get_hermes_home(), name)
+    return value if handled else _environ_or(name, default)
 
 
 def secret_source_label(name: str) -> str:

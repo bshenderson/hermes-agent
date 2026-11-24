@@ -228,7 +228,7 @@ def test_cold_profile_hydrates_external_source_without_global_env(
     monkeypatch.setattr(
         env_loader,
         "_load_secrets_config",
-        lambda home: (
+        lambda home, **kwargs: (
             {"fake-source": {"enabled": True}}
             if Path(home).resolve() == profile.resolve()
             else {}

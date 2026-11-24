@@ -347,7 +347,8 @@ def _run_check_fn_uncached(fn: Callable) -> bool:
     """Run an availability check without cache/grace handling."""
     from agent.secret_scope import UnscopedSecretError, current_secret_scope
     try:
-        return bool(fn())
+        from agent.lazy_secrets import probe_requirements
+        return probe_requirements(fn)
     except UnscopedSecretError:
         # The verdict comes from the LIVE scope at the catch site, not from which registry branch
         # ran the probe: ``no_cache_check_fn`` probes skip the cache-scope lookup entirely, so a
@@ -391,7 +392,8 @@ def _check_fn_cached(fn: Callable) -> bool:
             return cached[1]
     exc_info = None
     try:
-        value, outcome = bool(fn()), "returned False"
+        from agent.lazy_secrets import probe_requirements
+        value, outcome = probe_requirements(fn), "returned False"
     except Exception as exc:
         # Keep the exception for the verdict log below (emitted outside this block, where
         # ``exc_info=True`` would resolve to nothing): a check_fn that raises is a bug in the probe

@@ -399,6 +399,17 @@ def _select_new_servers(servers: dict[str, dict]) -> dict[str, dict]:
     return new_servers
 
 
+def _defer_cold_server(name, cfg):
+    if cfg.get('lazy_cold') != 'defer':
+        return False
+    with _core._lock:
+        key = _server_key(name)
+        _core._server_connecting.discard(key)
+        _core._lazy_server_configs[key] = dict(cfg)
+        _core._server_connect_errors[key] = 'deferred: schema cache unavailable; reconnect explicitly'
+    return True
+
+
 def _register_lazy_from_cache(new_servers: dict[str, dict]) -> tuple[dict[str, dict], int, int]:
     """Register ``lazy: true`` servers from a valid schema-cache entry without connecting
     (missing/stale entry or failed registration -> eager). Returns (eager servers, lazy tool
@@ -408,24 +419,39 @@ def _register_lazy_from_cache(new_servers: dict[str, dict]) -> tuple[dict[str, d
     eager_servers: dict[str, dict] = dict(new_servers)
     lazy_registered = 0
     lazy_server_count = 0
+    config_fingerprint = None
     try:
         from tools.mcp_schema_cache import config_fingerprint, get_cached_entry
-    except Exception:  # pragma: no cover - cache module missing
-        return eager_servers, 0, 0
+    except Exception:
+        get_cached_entry = None
     for name, cfg in new_servers.items():
         if not _resolve_server_lazy(name, cfg):
             continue
-        entry = get_cached_entry(name, config_fingerprint(cfg))
+        try:
+            entry = get_cached_entry(name, config_fingerprint(cfg)) if get_cached_entry and config_fingerprint else None
+        except Exception:
+            entry = None
         if not entry:
+            if _defer_cold_server(name, cfg):
+                eager_servers.pop(name, None)
+                lazy_server_count += 1
             continue
         with _core._lock:
             _core._server_connecting.discard(_server_key(name))
         try:
             names = _registration._register_from_cache_sync(name, cfg, entry)
-        except Exception as exc:
-            logger.warning("Failed lazy MCP registration for '%s': %s", name, exc)
+        except Exception:
+            logger.warning("Failed lazy MCP registration for '%s'", name)
+            if _defer_cold_server(name, cfg):
+                eager_servers.pop(name, None)
+                lazy_server_count += 1
+                continue
             with _core._lock:
                 _core._server_connecting.add(_server_key(name))
+            continue
+        if not names and _defer_cold_server(name, cfg):
+            eager_servers.pop(name, None)
+            lazy_server_count += 1
             continue
         eager_servers.pop(name, None)
         lazy_registered += len(names)

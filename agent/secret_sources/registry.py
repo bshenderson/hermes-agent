@@ -213,29 +213,41 @@ def _fetch_with_timeout(source: SecretSource, cfg: dict, home_path: Path,
     TIMEOUT and its eventual result discarded (the thread may linger until
     process exit — acceptable for a startup-only path).
     """
-    timeout = source.fetch_timeout_seconds(cfg)
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"secret-src-{source.name}")
+    from contextvars import copy_context
+    from agent.secret_sources.deadline import remaining
     try:
-        def _fetch() -> FetchResult:
-            token = set_source_environment(environ)
-            try:
-                return source.fetch(cfg, home_path)
-            finally:
-                reset_source_environment(token)
+        timeout = remaining(source.fetch_timeout_seconds(cfg))
+    except RuntimeError:
+        return FetchResult().fail('secret source deadline exhausted', ErrorKind.TIMEOUT)
+    future = concurrent.futures.Future()
 
-        future = executor.submit(_fetch)
+    def _fetch():
+        if not future.set_running_or_notify_cancel():
+            return
+        token = set_source_environment(environ)
         try:
-            result = future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            return FetchResult().fail(f"fetch exceeded {timeout:.0f}s budget — startup continued "
-                                      "without this source (raise secrets."
-                                      f"{source.name}.timeout_seconds if the backend is just slow)",
-                                      ErrorKind.TIMEOUT)
-        except Exception as exc:
-            return FetchResult().fail(f"fetch raised {type(exc).__name__}: {exc}", ErrorKind.INTERNAL)
+            future.set_result(source.fetch(cfg, home_path))
+        except BaseException as error:
+            future.set_exception(error)
+        finally:
+            reset_source_environment(token)
+
+    # Executor workers join at interpreter exit even after shutdown(wait=False).
+    # A non-cooperative plugin must not hold the model-free refusal process open.
+    worker = threading.Thread(target=copy_context().run, args=(_fetch,),
+                              name=f'secret-src-{source.name}', daemon=True)
+    worker.start()
+    try:
+        result = future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        return FetchResult().fail('secret source deadline exhausted', ErrorKind.TIMEOUT)
+    except Exception as exc:
+        return FetchResult().fail(f"fetch raised {type(exc).__name__}: {exc}", ErrorKind.INTERNAL)
     finally:
-        executor.shutdown(wait=False)
+        # Let bounded built-in subprocess cleanup finish, including when the
+        # main-thread startup alarm interrupts result(). Never join indefinitely.
+        worker.join(timeout=1)
 
     if not isinstance(result, FetchResult):
         return FetchResult().fail(f"fetch returned {type(result).__name__} instead of FetchResult",

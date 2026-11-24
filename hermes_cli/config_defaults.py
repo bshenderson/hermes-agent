@@ -2448,6 +2448,9 @@ DEFAULT_CONFIG = {
         },
     },
     "secrets": {
+        "lazy": False,  # Defer mapped 1Password values until the selected consumer reads them.
+        "lazy_timeout_seconds": 5,
+        "startup_names": {},  # Explicit required names by CLI surface, e.g. gateway: [API_SERVER_KEY].
         # Optional ordering of enabled sources (e.g. [onepassword, bitwarden]); default registration
         # order. Mapped sources (explicit VAR→ref) always beat bulk sources (BSM project dumps);
         # first claim on a var wins, later ones warn. "sources": [],

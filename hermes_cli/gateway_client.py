@@ -331,6 +331,8 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
     from hermes_cli.gateway_runtime_discovery import DiscoveryError
     from urllib.parse import urlsplit
 
+    from hermes_cli import startup_budget
+    startup_budget.stage('gateway')
     remote = "" if endpoint is not None else os.environ.get("HERMES_TUI_GATEWAY_URL", "").strip()
     protocols = None
     if endpoint is not None:
@@ -347,7 +349,8 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
         home = gateway_profile_home(get_hermes_home())
         # A client's own start: the daemon it may launch ends itself once idle (no client, adapter,
         # cron/kanban work or admission), and the next client starts a fresh one.
-        result = await asyncio.to_thread(ensure_gateway_runtime, home, idle_exit=True)
+        result = await asyncio.to_thread(ensure_gateway_runtime, home, idle_exit=True,
+                                         timeout=startup_budget.remaining(60.0))
         if not attachable(result) or (_REFUSE_RESTART_WAIT.get() and result.state != "ready"):
             detail = getattr(result, "detail", None)
             if result.reason_code == "runtime_exited" and detail:
@@ -375,6 +378,10 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
             if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
             async with GatewayClient(ws) as client:
+                # The classic transport runs on a worker loop; only the main
+                # thread may release its POSIX timer. Mark attachment for the
+                # main-thread expiry handler instead.
+                startup_budget.attached()
                 yield client
     except GatewayClientError:
         raise

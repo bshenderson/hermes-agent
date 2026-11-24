@@ -203,6 +203,10 @@ def reconnect_mcp_server(server_name: str) -> bool:
     from tools.mcp_tool_scope import _resolve_server_key
     with _core._lock:
         server = _core._servers.get(_resolve_server_key(server_name))
+        lazy = _resolve_server_key(server_name) in _core._lazy_server_configs
+    if server is None and lazy:
+        from tools.mcp_tool_discovery import _ensure_lazy_server_connected
+        return _ensure_lazy_server_connected(server_name)
     return server is not None and _signal_reconnect(server)
 
 

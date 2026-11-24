@@ -229,11 +229,41 @@ def scrub_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text or "")
 
 
+def _run_bounded_cli(argv, env, timeout, stdin):
+    """Own a POSIX helper group; expiry cannot leave its ordinary children running."""
+    import signal
+    process = subprocess.Popen(list(argv), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, encoding='utf-8', errors='replace', stdin=stdin,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass  # Kernel-blocked I/O is outside a userspace deadline guarantee.
+        raise
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+
 def run_cli(argv: Sequence[str], *, env: dict[str, str], timeout: float, label: str,
             timeout_message: str, stdin: Any = subprocess.DEVNULL) -> subprocess.CompletedProcess:
     """``subprocess.run`` an argv list (never a shell), capturing utf-8 text; timeout
     and spawn failure become ``RuntimeError``. Callers own returncode interpretation."""
+    from agent.secret_sources.deadline import bounded, remaining
+    timeout = remaining(timeout)
     try:
+        if os.name == 'posix' and bounded():
+            return _run_bounded_cli(argv, env, timeout, stdin)
         return subprocess.run(
             list(argv), env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, stdin=stdin,

@@ -726,7 +726,7 @@ def _load_mcp_config() -> dict[str, dict]:
         servers = servers if isinstance(servers, dict) else {}
         kept = _filter_suspicious_mcp_servers(servers)
         for name, cfg in kept.items():
-            interpolated = _interpolate_env_vars(cfg)
+            interpolated = dict(cfg) if cfg.get('lazy') is True else _interpolate_env_vars(cfg)
             if isinstance(interpolated, dict):
                 _warn_hidden_whitespace(name, interpolated)
                 safe_servers[name] = interpolated

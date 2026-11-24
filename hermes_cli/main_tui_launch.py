@@ -460,6 +460,22 @@ def _refuse_unforwarded_tui_flags(args) -> None:
         raise SystemExit(2)
 
 
+def _prepare_tui_gateway():
+    """Use the native connector so explicit remote routes never start a local owner."""
+    from hermes_cli import startup_budget
+    if not startup_budget.active():
+        return
+    import asyncio
+    from hermes_cli.gateway_client import connect_gateway
+
+    async def attach():
+        async with connect_gateway():
+            pass
+
+    asyncio.run(attach())
+    startup_budget.ready()
+
+
 def _launch_tui(
     resume_session_id: Optional[str] = None, tui_dev: bool = False, native_mode: Optional[bool] = None,
     model: Optional[str] = None,
@@ -564,6 +580,7 @@ def _launch_tui(
         env["HERMES_TUI_RESUME"] = resume_session_id
 
     argv, cwd = _make_tui_argv(tui_dir, tui_dev)
+    _prepare_tui_gateway()
     code: Optional[int] = None
     try:
         try:

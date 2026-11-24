@@ -582,6 +582,8 @@ if __name__ == "__main__" and getattr(sys.modules.get("__main__"), "__file__", N
     # override on the stripped argv, and `--profile default` would fall to the sticky profile.
     sys.modules.setdefault("hermes_cli.main", sys.modules["__main__"])
 _apply_profile_override()
+from hermes_cli import startup_budget as _client_startup_budget
+_client_startup_budget.arm_for_argv(sys.argv[1:])
 # ``-p``/active_profile re-homed the process after hermes_bootstrap ran: re-point the temp vars
 # at THIS home's scratch dir (a user-set TMPDIR is still left alone).
 try:
@@ -1617,6 +1619,7 @@ def cmd_chat(args):
     # The classic prompt only fronts the classic CLI.
     provider_configured = _has_any_provider_configured()
     if not use_tui and not provider_configured:
+        _client_startup_budget.ready()  # interactive setup is usable, not a startup wait
         _first_run_setup_guard(args)
         return
 

@@ -1466,14 +1466,18 @@ def _env_ref_var_name(ref: str) -> Optional[str]:
     return ref
 
 
-def _expand_env_vars(obj):
+def _expand_env_vars(obj, _path=()):
     """Recursively expand ``${VAR}`` / ``${env:VAR}`` in string values (keys/non-strings untouched)."""
     if isinstance(obj, str):
         return _ENV_REF_RE.sub(_env_expand_match, obj)
     if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
+        # Resolve deferred MCP credentials only at connection time, never from
+        # an earlier process environment captured during configuration loading.
+        if len(_path) == 2 and _path[0] == 'mcp_servers' and obj.get('lazy') is True:
+            return dict(obj)
+        return {k: _expand_env_vars(v, (*_path, k)) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_expand_env_vars(item) for item in obj]
+        return [_expand_env_vars(item, _path) for item in obj]
     return obj
 
 
