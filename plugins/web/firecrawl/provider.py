@@ -148,10 +148,19 @@ def check_firecrawl_api_key() -> bool:
     install, either route) is usable."""
     from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_web_capability_selection
 
+    def _direct_present() -> bool:
+        from hermes_cli.config import get_env_value
+        # Presence probes may receive a deferred credential, not a client key.
+        for name in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"):
+            value = get_env_value(name)
+            if value.strip() if isinstance(value, str) else value:
+                return True
+        return _is_explicit_firecrawl_selection()
+
     def _usable(selected) -> bool:
         if selected == NOUS_MANAGED_PROVIDER:
             return _is_tool_gateway_ready()
-        return _get_direct_firecrawl_config() is not None or (selected is None and _is_tool_gateway_ready())
+        return _direct_present() or (selected is None and _is_tool_gateway_ready())
 
     # Search and extract can each pick their route (own key vs gateway); usable if either one is.
     return any(_usable(read_web_capability_selection(cap)) for cap in ("search", "extract"))

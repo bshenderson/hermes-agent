@@ -1481,7 +1481,7 @@ def _expand_env_vars(obj, _path=()):
     return obj
 
 
-def _env_ref_snapshot(obj, snapshot=None):
+def _env_ref_snapshot(obj, snapshot=None, _path=()):
     """Map each env-sourced ``${...}`` ref in *obj* to its current value.
     Stored with cached ``load_config()`` results so a cache hit can detect that the expansion was
     made against a different environment (load before ``load_hermes_dotenv()``, in-process
@@ -1497,11 +1497,14 @@ def _env_ref_snapshot(obj, snapshot=None):
             if name is not None:
                 snapshot[name] = _env_ref_lookup(name)
     elif isinstance(obj, dict):
-        for value in obj.values():
-            _env_ref_snapshot(value, snapshot)
+        # Match expansion: deferred MCP refs are not inputs to this cache.
+        if len(_path) == 2 and _path[0] == 'mcp_servers' and obj.get('lazy') is True:
+            return snapshot
+        for key, value in obj.items():
+            _env_ref_snapshot(value, snapshot, (*_path, key))
     elif isinstance(obj, list):
         for item in obj:
-            _env_ref_snapshot(item, snapshot)
+            _env_ref_snapshot(item, snapshot, _path)
     return snapshot
 
 
