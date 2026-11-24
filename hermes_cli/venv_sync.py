@@ -378,6 +378,8 @@ def _may_retry_completion(root: Path, command: list[str], *, current: bool) -> b
     """Whether this launch runs the owed repair now; a suppressed one says why when it matters."""
     import sys
 
+    if current and not completion_pending_path(root).is_file():
+        return True  # Retained failure history alone is not an outstanding repair.
     if not current and command[:1] == ["update"] and not _REPORT_ONLY_UPDATE_FLAGS & set(command):
         # `hermes update` is the remedy every backed-off launch names: it always tries the repair.
         # Its report-only forms change nothing, so they stay inside the backoff like any launch.

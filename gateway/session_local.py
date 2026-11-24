@@ -353,6 +353,9 @@ def stage_local_session(authority, actor, params, *, trusted_policy=None, truste
             if key is None or not hmac.compare_digest(key, params.get('api_key') or ''):
                 raise RuntimeStoreError('admission_conflict')
         return restore_local_session(authority, sid)
+    if not isinstance(policy.model, str) or not policy.model.strip():
+        raise RuntimeStoreError('invalid_params', field='model',
+                                detail='Select a model or configure a default before creating a session')
     from gateway.session_policy import launch_skills
     if launch_skills(params) and skills_prompt is None:
         # `-s` is rendered off-loop by the RPC handler (render_launch_skills); a caller that
