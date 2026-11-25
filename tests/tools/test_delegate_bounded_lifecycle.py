@@ -14,6 +14,7 @@ import pytest
 def test_bounded_worker_scope_dispatch_and_settlement(tmp_path, monkeypatch, cancel):
     from run_agent import AIAgent
     from tools import delegate_tool as dt, delegate_tool_config as dtc, web_tools
+    from tools import delegate_tool_child_run as dtcr
     from tools.delegate_tool_child_run import _ChildRun
     from agent.agent_runtime_helpers import invoke_tool
     from agent import web_search_registry
@@ -30,7 +31,7 @@ def test_bounded_worker_scope_dispatch_and_settlement(tmp_path, monkeypatch, can
     monkeypatch.setattr(dt, '_load_config', dict)
     monkeypatch.setattr(dtc, '_load_config', dict)
     monkeypatch.setattr(web_tools, 'check_web_api_key', lambda: True)
-    monkeypatch.setattr(dt, '_get_child_timeout', lambda: 0.3 if cancel else 3)
+    monkeypatch.setattr(dtcr, '_get_child_timeout', lambda: 0.3 if cancel else 3)
     parent = AIAgent(api_key='fixture-parent', base_url='http://127.0.0.1:9/v1',
                      provider='custom', api_mode='chat_completions', model='fixture',
                      session_id='lifecycle-parent', platform='cli', quiet_mode=True,

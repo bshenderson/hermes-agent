@@ -8,8 +8,9 @@ import asyncio
 import pytest
 
 from gateway.platforms.api_server_terminal import FailureDispositionStore
+from gateway.session_authority import admission_row
 from gateway.session_results import execution_result
-from hermes_state_runtime import list_session_admissions
+from persistence.core.errors import AuthorityRefusal
 from tests.waiting import async_wait_until
 
 ORIGIN = {'subject_id': 'owner', 'chat_id': 'chat', 'message_id': 'reply',
@@ -38,7 +39,8 @@ async def test_authority_failure_survives_departed_observer(api, owner, tmp_path
         if task.done():
             await task
         assert entered.is_set()
-        row, = list_session_admissions(owner.db, session_id='authored')
+        row, = [admission_row(record) for record in owner.persistence.admissions.list(
+            session_id='authored')]
         assert row['status'] == 'started'
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -81,11 +83,10 @@ async def test_authority_does_not_infer_failure_from_other_outcomes(api, owner, 
 
 def test_durable_origin_is_validated_and_not_session_settings(api, owner):
     from gateway.session_api_turn import admit_api_turn, api_settings, check_api_turn
-    from hermes_state_runtime import RuntimeStoreError
     _, ref, row = admit_api_turn(api, user_message='fixture', conversation_history=[],
                                 session_id='bound', authored_origin=ORIGIN)
     assert row['payload']['api_turn_v1']['authored_origin'] == ORIGIN
     assert 'authored_origin' not in api_settings(owner, ref)
     row['payload']['api_turn_v1']['authored_origin'] = {**ORIGIN, 'profile': 'foreign'}
-    with pytest.raises(RuntimeStoreError, match='invalid_params'):
+    with pytest.raises(AuthorityRefusal, match='invalid_params'):
         check_api_turn(owner, ref, row['payload'])

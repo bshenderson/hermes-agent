@@ -129,6 +129,9 @@ def test_run_single_child_result_json_unchanged_by_transcript_release():
         )
         child.close.assert_called_once()
         entry.pop("duration_seconds", None)
+        # Execution accounting carries wall-clock fields too; no transcript content derives from them.
+        for key in ("elapsed_seconds", "pending_seconds", "execution_seconds"):
+            entry["execution_accounting"].pop(key, None)
         results.append(json.dumps(entry, sort_keys=True, default=str))
     assert results[0] == results[1]
     parsed = json.loads(results[0])

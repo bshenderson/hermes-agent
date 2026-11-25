@@ -59,6 +59,17 @@ from tools.delegate_tool_results import (
     _apply_summary_budget, _build_child_preserving_parent_tools, _run_child_lifecycle, _summarize_tool_arguments,
 )
 
+
+def _load_config() -> dict:
+    """Delegation config, resolved through the module that owns it.
+
+    Call sites keep this thin indirection so both patch styles bind: tests that
+    replace this module's ``_load_config`` and tests that replace
+    ``delegate_tool_config._load_config`` (the owner) both take effect.
+    """
+    return delegate_tool_config._load_config()
+
+
 _ROLES = frozenset({"leaf", "orchestrator"})
 
 
@@ -268,7 +279,7 @@ def _build_child_agent(
     # General delegation behavior (reasoning, compression, capabilities) stays
     # global. Only fallback policy follows the owner of a per-call route such
     # as auxiliary.review.
-    delegation_cfg = delegate_tool_config._load_config()
+    delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
     if context_only:
         child_toolsets = ['no_mcp', 'web'] if ceiling else ['no_mcp']
@@ -680,7 +691,7 @@ def delegate_task(
             f"multiplies API cost)."
         )
 
-    cfg = delegate_tool_config._load_config()
+    cfg = _load_config()
     default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     # Caller-supplied max_iterations is ignored: the config value is authoritative
     # so budgets stay predictable (kwarg kept for internal callers/tests).
@@ -859,7 +870,7 @@ def _build_dynamic_schema_overrides() -> dict:
     # The active delegation provider's per-task parameters and guidance (delegation.backend; none for the
     # built-in default). Built from config with the rest of the definition, never per turn.
     from tools.delegate_tool_routes import schema_extension
-    extra_params, addendum = schema_extension(delegate_tool_config._load_config())
+    extra_params, addendum = schema_extension(_load_config())
     if extra_params:
         tasks = overrides_params["properties"]["tasks"]
         tasks["items"] = {**tasks["items"], "properties": {**tasks["items"]["properties"], **extra_params}}

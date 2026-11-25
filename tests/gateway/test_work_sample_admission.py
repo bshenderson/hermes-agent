@@ -14,17 +14,16 @@ async def case(home, outcome, other):
     from gateway.platforms.api_server import APIServerAdapter
     from gateway.platforms.api_server_run_queue import admit_request
     from gateway.session_results import execution_result
-    from hermes_state import SessionDB
-    from hermes_state_runtime import begin_runtime_epoch
+    from persistence_assembly import open_persistence, profile_scope
     from tests.gateway.restart_test_helpers import make_restart_runner
 
-    db = SessionDB(home / 'state.db')
+    db = open_persistence(profile_scope(home=home))
     store = SessionStore(config=GatewayConfig(), sessions_dir=home / 'sessions')
-    store._db = db
+    store._db, store._persistence_beside = db, lambda pinned: pinned
     runner, _ = make_restart_runner()
     runner.session_store = store
-    authority = SessionAuthority(runner, profile_id='default', instance_id='probe', db=db,
-                                 epoch=begin_runtime_epoch(db, instance_id='probe'))
+    authority = SessionAuthority(runner, profile_id='default', instance_id='probe', persistence=db,
+                                 epoch=db.runtime.begin_epoch(instance_id='probe'))
     runner.session_authority = authority
     adapter = APIServerAdapter(PlatformConfig(enabled=True))
     adapter.gateway_runner = runner

@@ -63,10 +63,11 @@ def retain_authority_failure(authority, row):
     if not origin:
         return
     from gateway.session_authorities import owner_scope
+    from gateway.session_persistence import authority_persistence
     from gateway.session_results import admission_result
     try:
         with owner_scope(authority):
-            saved = admission_result(authority.db, row['admission_id'])
+            saved = admission_result(authority_persistence(authority), row['admission_id'])
             if saved is not None:
                 retain_failure(saved['result'], origin)
     except Exception:

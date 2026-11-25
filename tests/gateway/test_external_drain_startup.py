@@ -6,7 +6,7 @@ import pytest
 from gateway.run_startup import GatewayStartupMixin
 from gateway.drain_control import write_drain_request
 from gateway.session_authority import SessionAuthority
-from hermes_state_runtime import RuntimeStoreError
+from persistence.core.errors import AuthorityRefusal
 
 
 @pytest.mark.asyncio
@@ -33,7 +33,7 @@ async def test_startup_admission_before_recovery(tmp_path, monkeypatch, marker):
         authority = SimpleNamespace(retiring=False, runner=runner)
         assert GatewayStartupMixin._serving_state(runner) == ('draining' if marker == 'active' else 'running')
         if marker == 'active':
-            with pytest.raises(RuntimeStoreError, match='runtime_draining'):
+            with pytest.raises(AuthorityRefusal, match='runtime_draining'):
                 SessionAuthority._require_admission_open(authority)
         else:
             SessionAuthority._require_admission_open(authority)

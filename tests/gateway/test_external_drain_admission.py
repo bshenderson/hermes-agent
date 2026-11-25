@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_state import SessionDB
-from hermes_state_runtime import RuntimeStoreError, begin_runtime_epoch, list_session_admissions
+from gateway.session_authority import admission_row
+from persistence.conversation.sessions import NewSession, SessionId
+from persistence.core.errors import AuthorityRefusal
+from persistence_assembly import open_persistence, profile_scope
 
 
 @pytest.mark.asyncio
@@ -17,8 +19,13 @@ async def test_external_drain_refuses_canonical_submit_without_durable_input(tmp
     from gateway.session_controls import AuthorityConnection
 
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
-    db = SessionDB(tmp_path / 'state.db')
-    db.create_session('s', source='telegram')
+    store = open_persistence(profile_scope(home=tmp_path))
+    store.sessions.create(NewSession(SessionId('s'), 'telegram'))
+
+    def admissions():
+        """The session's admission rows, as the store lists them."""
+        return [admission_row(row) for row in store.admissions.list(session_id='s')]
+
     ran = []
 
     async def handle(event):
@@ -29,16 +36,16 @@ async def test_external_drain_refuses_canonical_submit_without_durable_input(tmp
                              config=SimpleNamespace(multiplex_profiles=False),
                              session_runtime_descriptor={'state': 'draining'},
                              _adapter_for_source=lambda source: None, _handle_message=handle)
-    authority = SessionAuthority(runner, profile_id='p', instance_id='owner', db=db,
-                                 epoch=begin_runtime_epoch(db, instance_id='owner'))
+    authority = SessionAuthority(runner, profile_id='p', instance_id='owner', persistence=store,
+                                 epoch=store.runtime.begin_epoch(instance_id='owner'))
     authority.sessions['s'] = LiveSession(
         SessionSource(platform=Platform.TELEGRAM, chat_id='c', user_id='human'), 'route')
     actor = SessionActor('human', 'p', frozenset({'session:submit'}), 't')
     try:
-        with pytest.raises(RuntimeStoreError, match='runtime_draining'):
+        with pytest.raises(AuthorityRefusal, match='runtime_draining'):
             await authority.submit(actor, Submission('r1', SessionRef('p', 's'), {'text': 'next'}, 'queue'),
                                    queue_while_restarting=True)
-        assert list_session_admissions(db, session_id='s') == []
+        assert admissions() == []
         assert ran == []
         connection = AuthorityConnection(authority, object(), {'user_id': 'human'}, operator=True)
         try:
@@ -49,15 +56,15 @@ async def test_external_drain_refuses_canonical_submit_without_durable_input(tmp
                 'session_id': 's', 'submission_id': 'r2', 'text': 'after maintenance'}}
             refused = await connection.dispatch(request)
             assert refused['error']['message'] == 'runtime_draining'
-            assert list_session_admissions(db, session_id='s') == []
+            assert admissions() == []
             runner._external_drain_active = False
             accepted = await connection.dispatch(request)
             assert 'result' in accepted, accepted
-            assert len(list_session_admissions(db, session_id='s')) == 1
+            assert len(admissions()) == 1
         finally:
             await connection.close()
     finally:
         task = authority.sessions['s'].task
         if task is not None:
             await asyncio.wait_for(task, 10)
-        db.close()
+        store.close()
