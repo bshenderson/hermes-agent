@@ -515,7 +515,9 @@ def test_web_search_synthesis_redirect_ends_turn_instead_of_looping():
     assert mock_hfc.call_count == 4
     assert result["turn_exit_reason"] == "guardrail_halt"
     assert result["guardrail"]["code"] == "web_search_synthesis_redirect"
-    assert "stopped retrying" in result["final_response"]
+    assert result["guardrail"]["count"] == 4
+    assert "search-synthesis policy" in result["final_response"]
+    assert "stopped retrying" not in result["final_response"]
 
 
 def test_gxtd712_api_plugin_empty_loop_ends_real_agent_turn():

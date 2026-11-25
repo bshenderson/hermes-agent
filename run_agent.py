@@ -1308,13 +1308,9 @@ class AIAgent(
             record_guardrail_decision(self, decision.action, decision.code)
 
     def _toolguard_controlled_halt_response(self, decision: ToolGuardrailDecision) -> str:
-        # Shown to the user as the reply, so no decision codes; the code stays in result["guardrail"].
-        return (
-            f"I stopped retrying because I kept running {decision.tool_name or 'the same tool'} "
-            f"{decision.count} times without making progress. The last result above shows what "
-            "blocked it. Tell me how you'd like to proceed, or send `continue` and I'll try a "
-            "different approach."
-        )
+        # A budget, a synthesis redirect and an observed replay are different
+        # stop reasons. Preserve the controller's facts through final delivery.
+        return f"I stopped this turn. {decision.message}"
 
     def _append_guardrail_observation(self, tool_name: str, function_args: dict, function_result: str, *,
                                       failed: bool, tool_call_id: str = "") -> str:

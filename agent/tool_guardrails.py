@@ -331,15 +331,17 @@ _DECISION_MESSAGES: dict[str, str] = {
         "progress; use the results already provided or change strategy."
     ),
     "loop_web_search_cap": (
-        "Blocked web_search: this turn has already made {cap} web searches, the per-turn limit. "
-        "This looks like a runaway search loop. Work with the results you already have and give the user your answer."
+        "Blocked web_search: this turn has admitted {count} searches (budget {cap}). "
+        "The per-turn search budget is exhausted; this does not establish repetition or lack of progress. "
+        "Use the results already available or report the budget constraint."
     ),
     "loop_subagent_cap": (
-        "Blocked delegate_task: this turn has already spawned {count} subagents (limit {cap}). "
-        "This looks like a runaway delegation loop. Finish the work with the results you have and answer the user."
+        "Blocked delegate_task: this turn has admitted {count} subagent spawns (budget {cap}); "
+        "the requested batch would exceed the remaining budget. "
+        "This does not establish repetition or lack of progress. Use the results already available."
     ),
     "loop_execute_code_cap": (
-        "Blocked execute_code: this turn has already made {cap} execute_code calls. "
+        "Blocked execute_code: this turn has admitted {count} execute_code calls (budget {cap}). "
         "The per-turn execution budget is exhausted; this does not establish repeated calls or lack of progress. "
         "Use the results already available or report the budget constraint."
     ),
@@ -453,7 +455,7 @@ class ToolCallGuardrailController:
         if synthesis_redirect is not None:
             return synthesis_redirect
         if not self.config.hard_stop_enabled:
-            return allow
+            return self._admit_call(tool_name, args, allow)
         # A mutation since this call last failed makes the retry a new experiment.
         exact_count = 0 if self._progress_since_failure.get(signature) else self._exact_failure_counts.get(signature, 0)
         if exact_count >= self.config.exact_failure_block_after:
@@ -464,7 +466,7 @@ class ToolCallGuardrailController:
         cross_record = getattr(self, "_cross_turn_no_progress", {}).get(signature)
         if cross_record is not None and cross_record[1] >= self.config.no_progress_block_after:
             return self._decide("block", "idempotent_no_progress_block", tool_name, cross_record[1], signature)
-        return allow
+        return self._admit_call(tool_name, args, allow)
 
     def after_call(
         self, tool_name: str, args: Mapping[str, Any] | None, result: str | None,
@@ -533,6 +535,19 @@ class ToolCallGuardrailController:
             self._same_tool_failure_counts.clear()
             self._cross_turn_no_progress.clear()
 
+        cap = self.config.loop_caps.max_execute_code_calls
+        remaining = cap - self._turn_execute_code_count
+        if tool_name == "execute_code" and warnings and cap and remaining in {0, 1, 2}:
+            return ToolGuardrailDecision(
+                action="warn", code="execution_budget_warning", tool_name=tool_name,
+                count=self._turn_execute_code_count, signature=signature,
+                message=(
+                    f"Execution budget: {remaining} execute_code calls remain this turn (limit {cap}). "
+                    "Prioritize completing and reporting the current work with the available results. "
+                    "This is a resource limit, not a diagnosis of failed progress."
+                ),
+            )
+
         synthesis_hint = self._record_web_evidence_success(tool_name, signature)
         if synthesis_hint is not None:
             return synthesis_hint
@@ -591,17 +606,17 @@ class ToolCallGuardrailController:
         threshold = self.config.web_search_synthesis_redirect_after
         if self._same_tool_failure_counts.get(tool_name, 0):
             return None
-        if not threshold or self._turn_web_search_count <= threshold:
+        if not threshold or self._turn_web_search_count < threshold:
             return None
         count = self._turn_web_search_count
         return ToolGuardrailDecision(
             action="redirect",
             code="web_search_synthesis_redirect",
             message=(
-                f"Skipped web_search: this turn already requested {count} web_search "
-                "calls. Stop broad searching. Use the search results already in the "
-                "transcript, call web_extract only for one specific source if full "
-                "text is essential, otherwise answer the user now."
+                f"Skipped web_search: this turn has admitted {count} web_search calls. "
+                "The search-synthesis policy stopped further searching; this does not "
+                "establish repeated calls or lack of progress. The available results "
+                "remain in the transcript."
             ),
             tool_name=tool_name,
             count=count,
@@ -723,18 +738,27 @@ class ToolCallGuardrailController:
     def _check_loop_cap(
         self, tool_name: str, args: Mapping[str, Any], signature: ToolCallSignature,
     ) -> ToolGuardrailDecision | None:
-        """Block once a per-turn cap is reached (BEFORE the call, so the (cap+1)-th is refused), else advance
-        the counter and return None. delegate_task control actions spawn nothing and keep working after the cap."""
+        """Refuse an over-budget request without charging it. Control actions spawn nothing."""
         spec = _LOOP_CAPS.get(tool_name)
         if spec is None:
             return None
         cap_field, count_attr, code = spec
         cap, count = getattr(self.config.loop_caps, cap_field), getattr(self, count_attr)
         increment = _subagent_spawn_count(args) if tool_name == "delegate_task" else 1
-        if increment and cap and count >= cap:
+        if increment and cap and count + increment > cap:
             return self._decide("block", code, tool_name, count, signature, cap=cap)
-        setattr(self, count_attr, count + increment)
         return None
+
+    def _admit_call(
+        self, tool_name: str, args: Mapping[str, Any], decision: ToolGuardrailDecision,
+    ) -> ToolGuardrailDecision:
+        """Charge only requests that passed every pre-dispatch guard, including when uncapped."""
+        spec = _LOOP_CAPS.get(tool_name)
+        if spec is not None:
+            count_attr = spec[1]
+            increment = _subagent_spawn_count(args) if tool_name == "delegate_task" else 1
+            setattr(self, count_attr, getattr(self, count_attr) + increment)
+        return decision
 
 
 def toolguard_synthetic_result(decision: ToolGuardrailDecision) -> str:
