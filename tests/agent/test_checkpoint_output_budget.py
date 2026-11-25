@@ -165,17 +165,23 @@ def test_required_body_overflow_still_refuses(complete_case, monkeypatch):
 
 @pytest.mark.parametrize('in_place', [True, False])
 def test_real_commit_reload_keeps_custody_with_bounded_excerpts(complete_case, tmp_path, monkeypatch, in_place):
-    from hermes_state import SessionDB
+    from persistence_assembly import open_persistence, profile_scope
+    from persistence.conversation.messages import ConversationRequest, NewMessage
+    from persistence.conversation.sessions import NewSession, SessionId
     from run_agent import AIAgent
     messages, compressor, obligations = complete_case
-    path = tmp_path / 'state.db'
-    db = SessionDB(db_path=path)
-    try:
-        db.create_session('source-session', source='fixture')
-        db.append_messages_batch('source-session', messages)
-        original = db.get_messages_as_conversation('source-session')
+    sid = SessionId('source-session')
+
+    def conversation(store, session_id):
+        return [message.as_openai_message() for message in store.messages.read_conversation(
+            session_id, ConversationRequest(repair_alternation=True))]
+
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        db.sessions.create(NewSession(sid, 'fixture'))
+        db.messages.append_batch(sid, tuple(NewMessage.from_live(row) for row in messages))
+        original = conversation(db, sid)
         agent = AIAgent(api_key='nonfunctional-fixture', base_url='http://127.0.0.1:1/v1',
-                        model='fixture', quiet_mode=True, session_db=db,
+                        model='fixture', quiet_mode=True, persistence=db,
                         session_id='source-session', skip_context_files=True, skip_memory=True)
         agent.context_compressor = compressor
         agent._compression_feasibility_checked = True
@@ -184,11 +190,8 @@ def test_real_commit_reload_keeps_custody_with_bounded_excerpts(complete_case, t
         result, _ = agent._compress_context(copy.deepcopy(original), 'Existing system prompt.', force=True)
         assert len(result) < len(original), compressor._last_summary_error
         active_session = agent.session_id
-    finally:
-        db.close()
-    db = SessionDB(db_path=path)
-    try:
-        reloaded = db.get_messages_as_conversation(active_session, repair_alternation=True)
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        reloaded = conversation(db, SessionId(active_session))
         handoffs = [_handoff_only_content(row['content']) for row in reloaded
                     if row.get(COMPRESSED_SUMMARY_METADATA_KEY)]
         assert sum(len(text.encode()) for text in handoffs) <= 24576
@@ -209,5 +212,3 @@ def test_real_commit_reload_keeps_custody_with_bounded_excerpts(complete_case, t
         assert sum(len(text.encode()) for text in next_handoffs) <= 24576
         expected = set(obligations.values()) | {'Assignee: Zoë'}
         assert {record for text in next_handoffs for record in decode_records(text)} == expected
-    finally:
-        db.close()

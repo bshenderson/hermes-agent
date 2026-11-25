@@ -124,14 +124,15 @@ def test_map_reduce_counts_real_chunks(compressor, monkeypatch):
 @pytest.mark.parametrize('glyph', ['x', '界'])
 @pytest.mark.parametrize('pointer', [False, True])
 def test_exact_boundary_with_real_task_pointer(compressor, tmp_path, delta, glyph, pointer):
-    from hermes_state import SessionDB
+    from persistence_assembly import open_persistence, profile_scope
+    from persistence.conversation.sessions import NewSession, SessionId
     from agent.compression_preservation import frame_best_effort, WORK_STATE_POINTER_HEADING
     from agent.protected_events import SourceRecords
     from agent.context_compressor import _SUMMARY_END_MARKER
     from tests.agent.test_gxtd811_best_effort_compression import _append_todo_pair
-    with SessionDB(db_path=tmp_path / 'state.db') as db:
-        db.create_session('boundary', 'cli', profile_name='default')
-        compressor.bind_session_state(session_db=db, session_id='boundary')
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        db.sessions.create(NewSession(SessionId('boundary'), 'cli', profile_name='default'))
+        compressor.bind_session_state(persistence=db, session_id='boundary')
         if pointer:
             _append_todo_pair(db, 'boundary', 'bounded')
         prose = glyph * 1000
@@ -146,39 +147,57 @@ def test_exact_boundary_with_real_task_pointer(compressor, tmp_path, delta, glyp
 
 
 def test_two_saturated_compactions_install_and_reopen(compressor, monkeypatch, tmp_path):
-    from hermes_state import SessionDB
+    from persistence_assembly import open_persistence, profile_scope
+    from persistence.conversation.messages import (
+        ConversationRequest, NewMessage, TranscriptRead, TranscriptView,
+    )
+    from persistence.conversation.sessions import NewSession, SessionId
     from tests.agent.test_gxtd811_best_effort_compression import _append_todo_pair
+    from tools.todo_tool import MAX_TODO_RESULT_CHARS
     from agent.compression_preservation import WORK_STATE_POINTER_HEADING
-    path = tmp_path / 'state.db'
-    with SessionDB(db_path=path) as db:
-        db.create_session('repeat', 'cli', profile_name='default')
-        compressor.bind_session_state(session_db=db, session_id='repeat')
-        db.append_messages_batch('repeat', copy.deepcopy(history()))
+    sid = SessionId('repeat')
+
+    def batch(store, rows):
+        store.messages.append_batch(sid, tuple(NewMessage.from_live(row) for row in rows))
+
+    def conversation(store):
+        return [message.as_openai_message() for message in store.messages.read_conversation(
+            sid, ConversationRequest(repair_alternation=True))]
+
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        db.sessions.create(NewSession(sid, 'cli', profile_name='default'))
+        compressor.bind_session_state(persistence=db, session_id='repeat')
+        batch(db, copy.deepcopy(history()))
         _append_todo_pair(db, 'repeat', 'one')
         for turn in range(2):
             if turn:
-                db.append_messages_batch('repeat', copy.deepcopy(history()[1:]))
-            with db._read_ctx() as conn:
-                originals = [(r['id'], r['role'], r['content']) for r in conn.execute(
-                    "SELECT id,role,content FROM messages WHERE session_id='repeat' ORDER BY id")]
-            rows = db.get_messages_as_conversation('repeat', repair_alternation=True)
-            reply = '## Overview\nNext action: review fixture.\n' + '界' * 12000
+                batch(db, copy.deepcopy(history()[1:]))
+            # Every row the table holds, archived rewinds included: the archive keeps ids.
+            def rows_from_table():
+                return db.messages.read_transcript(sid, TranscriptRead(view=TranscriptView.ALL))
+
+            originals = [(int(row.id), row.role, row.content) for row in rows_from_table()]
+            rows = conversation(db)
+            # The second checkpoint carries the first one's mandatory custody (events, todo
+            # pointer, skill rule), which is charged before optional prose: the reply that fit
+            # alone no longer fits beside it, so the fixture keeps the later one inside the floor.
+            reply = '## Overview\nNext action: review fixture.\n' + '界' * (12000 if turn == 0 else 4000)
             monkeypatch.setattr(compressor, '_call_summary_llm', lambda *_: reply)
             result = compressor.compress(copy.deepcopy(rows), force=True)
             assert not compressor._last_compress_aborted, compressor._last_summary_error
             assert result != rows
             assert len(carrier(result).encode()) <= 24576
             assert WORK_STATE_POINTER_HEADING in carrier(result)
-            db.archive_and_compact('repeat', copy.deepcopy(result))
-            with db._read_ctx() as conn:
-                after = {r['id']: (r['role'], r['content']) for r in conn.execute(
-                    "SELECT id,role,content FROM messages WHERE session_id='repeat'")}
+            # The protected tail is carried, not rewritten: its row ids must survive the archive.
+            db.messages.compact(sid, tuple(NewMessage.from_live(row) for row in result),
+                                carried_tail_count=2)
+            after = {int(row.id): (row.role, row.content) for row in rows_from_table()}
             assert all(after[i] == (role, text) for i, role, text in originals)
-    with SessionDB(db_path=path) as db:
-        rows = db.get_messages_as_conversation('repeat', repair_alternation=True)
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        rows = conversation(db)
         assert 'Next action: review fixture.' in carrier(rows)
         assert WORK_STATE_POINTER_HEADING in carrier(rows)
-        assert db.get_latest_todo_result('repeat')
+        assert db.messages.latest_todo_result(sid, max_chars=MAX_TODO_RESULT_CHARS)
 
 
 @pytest.mark.parametrize('tail_role', ['user', 'assistant'])
