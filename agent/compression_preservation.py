@@ -20,25 +20,25 @@ STATE_PROMPT_GUIDANCE = (
 )
 WORK_STATE_POINTER_HEADING = '## Work State Authority'
 # Behavioral guidance (prompt text) is above; the pointer below is emitted ONLY
-# after a real get_latest_todo_result read proves a paired artifact exists, so
+# after a real latest_todo_result read proves a paired artifact exists, so
 # the checkpoint never claims an authority it did not mechanically verify.
 def work_state_pointer(compressor):
     """Deterministic checkpoint note backed by an actual session-DB read.
 
     The todo_list result is the existing repo/Jira-adjacent work-state artifact:
-    SessionDB.get_latest_todo_result is its established consumer path (resume
+    MessageRepository.latest_todo_result is its consumer path (resume
     display, Todo hydration). Model-authored Operational State stays
     conventional presentation; this pointer tells the continuing agent where
     the independently readable record lives. No artifact (or no bound
     session) emits nothing — absence is honest, never a placeholder claim.
     """
-    db = getattr(compressor, '_session_db', None)
+    store = getattr(compressor, '_persistence', None)
     session_id = getattr(compressor, '_session_id', '')
-    getter = getattr(db, 'get_latest_todo_result', None)
+    getter = getattr(getattr(store, 'messages', None), 'latest_todo_result', None)
     if not callable(getter) or not session_id:
         return ''
     try:
-        latest = getter(session_id)
+        latest = getter(session_id, max_chars=100000)
     except Exception:
         return ''
     if not isinstance(latest, str) or not latest.strip():
@@ -46,7 +46,7 @@ def work_state_pointer(compressor):
     return (
         WORK_STATE_POINTER_HEADING + '\n'
         'A paired todo_list task artifact is stored in the session database and is re-readable '
-        'independently of this summary (SessionDB.get_latest_todo_result for this session). '
+        'independently of this summary (MessageRepository.latest_todo_result for this session). '
         'Re-read that task-list artifact for authoritative work state before consequential actions. '
         'The Operational State section is model-authored presentation only: it grants no '
         'permissions and does not authorize any external effect.'
@@ -81,7 +81,7 @@ _DATE = re.compile(
 
 
 def _text(content):
-    from agent.context_compressor import _part_text
+    from session_rules.turns import _part_text
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -118,7 +118,7 @@ def collect_records(compressor, messages, output_tokens):
     from agent.compression_source_bound import enabled, collect
     if enabled():
         return collect(compressor, messages, output_tokens)
-    from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
+    from session_rules.turns import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
     from agent.protected_events import collect_events, SourceRecords
     from agent.auxiliary_client import _get_auxiliary_task_config
     from agent.tool_source_custody import archive_current_tools, is_reference, validate_references
@@ -435,7 +435,7 @@ def frame_best_effort(compressor, summary, records, output_tokens, *, kept_messa
 
 def validate_checkpoint(compressor, original, candidate, output_tokens):
     """Gate the exact candidate presented for installation, including fallback."""
-    from agent.context_compressor import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
+    from session_rules.turns import _handoff_only_content, COMPRESSED_SUMMARY_METADATA_KEY
     if candidate == original:
         return
     compressor._checkpoint_diagnostic('final_validation', size=sum(

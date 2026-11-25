@@ -9,7 +9,10 @@ import json
 
 import pytest
 
-from hermes_state import SessionDB
+from persistence import SessionId
+from persistence_assembly import open_persistence, profile_scope
+from persistence.conversation.sessions import NewSession
+from persistence.conversation.messages import NewMessage, ConversationRequest
 from agent.context_compressor import (
     COMPRESSED_SUMMARY_METADATA_KEY, SUMMARY_PREFIX,
     HISTORICAL_TASK_HEADING, _NO_USER_TASK_SENTINEL,
@@ -140,7 +143,9 @@ def test_state_prompt_guidance_reaches_the_summary_dispatch(best_effort_compress
     monkeypatch.setattr(best_effort_compressor, '_call_summary_llm', capture)
     best_effort_compressor.compress(history(), force=True)
     assert prompts, 'fixture model must be exercised'
-    assert all(STATE_PROMPT_GUIDANCE in prompt for prompt in prompts)
+    assert all(isinstance(prompt, list) and any(
+        row['role'] == 'system' and STATE_PROMPT_GUIDANCE in row['content']
+        for row in prompt) for prompt in prompts)
 
 
 @pytest.mark.parametrize('reply', [
@@ -164,11 +169,11 @@ def test_two_compactions_carry_and_refresh_state_then_durable_reload(tmp_path, m
                           protect_first_n=1, protect_last_n=2, abort_on_summary_failure=True)
     c.tail_token_budget = 10
     monkeypatch.setattr(c, '_call_summary_llm', lambda *_: state_reply('Ship the compression MVP.'))
-    with SessionDB(db_path=tmp_path / 'state.db') as db:
-        db.create_session('s', 'cli', profile_name='default')
-        c.bind_session_state(session_db=db, session_id='s')
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        db.sessions.create(NewSession(SessionId('s'), 'cli', profile_name='default'))
+        c.bind_session_state(persistence=db, session_id='s')
         rows = history()
-        db.append_messages_batch('s', copy.deepcopy(rows))
+        db.messages.append_batch('s', tuple(NewMessage.from_live(row) for row in rows))
         first = c.compress(copy.deepcopy(rows), force=True)
         assert first != rows, c._last_summary_error
         assert state_fields(first)['Current Task'] == 'Ship the compression MVP.'
@@ -181,7 +186,7 @@ def test_two_compactions_carry_and_refresh_state_then_durable_reload(tmp_path, m
                             .replace('Next Action: run the focused suite.',
                                      'Next Action: hand the candidate to the parent.'))
         second_input = first + history('Assignee: Zoë')[1:]
-        db.append_messages_batch('s', copy.deepcopy(history('Assignee: Zoë')[1:]))
+        db.messages.append_batch('s', tuple(NewMessage.from_live(row) for row in history('Assignee: Zoë')[1:]))
         second = c.compress(copy.deepcopy(second_input), force=True)
         assert second != second_input, c._last_summary_error
         values = state_fields(second)
@@ -189,13 +194,11 @@ def test_two_compactions_carry_and_refresh_state_then_durable_reload(tmp_path, m
         assert values['Permissions'] == 'repository only', 'unchanged field must carry'
         assert values['Next Action'] == 'hand the candidate to the parent.'
 
-        db.archive_and_compact('s', copy.deepcopy(second))
+        db.messages.compact('s', tuple(NewMessage.from_live(row) for row in second))
 
-    with SessionDB(db_path=tmp_path / 'state.db') as reopened:
-        with reopened._read_ctx() as conn:
-            stored = [(row['role'], row['content']) for row in conn.execute(
-                "SELECT role, content FROM messages WHERE session_id='s' "
-                "AND COALESCE(_compressed_summary,0)=1 ORDER BY id")]
+    with open_persistence(profile_scope(home=tmp_path)) as reopened:
+        stored = [(row.role, row.content) for row in reopened.messages.read_transcript('s')
+                  if row.compressed_summary]
     assert stored, 'compaction summary rows must survive durable reopen'
     assert any(OPERATIONAL_STATE_HEADING in content for _role, content in stored)
     for _role, content in stored:
@@ -270,18 +273,18 @@ TODO_PAIR = ('{"revision": 2, "todos": ['
 
 
 def _append_todo_pair(db, session_id, tag):
-    db.append_messages_batch(session_id, [
+    db.messages.append_batch(session_id, tuple(NewMessage.from_live(row) for row in [
         {'role': 'assistant', 'content': f'{tag} tracking it.',
          'tool_calls': [{'id': f'todo-{tag}', 'type': 'function',
                          'function': {'name': 'todo_list',
                                       'arguments': '{"action": "replace_all"}'}}]},
         {'role': 'tool', 'tool_call_id': f'todo-{tag}', 'tool_name': 'todo_list',
-         'content': TODO_PAIR}])
+         'content': TODO_PAIR}]))
 
 
 def test_work_state_pointer_requires_real_todo_artifact_read(tmp_path, monkeypatch):
     # Mechanical link, not prompt prose: the checkpoint claims task-artifact
-    # authority ONLY when SessionDB.get_latest_todo_result actually returns a
+    # authority ONLY when MessageRepository.latest_todo_result actually returns a
     # paired artifact. No artifact -> no pointer, never a placeholder claim.
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, 'best_effort')
@@ -291,11 +294,11 @@ def test_work_state_pointer_requires_real_todo_artifact_read(tmp_path, monkeypat
                           protect_first_n=1, protect_last_n=2, abort_on_summary_failure=True)
     c.tail_token_budget = 10
     monkeypatch.setattr(c, '_call_summary_llm', lambda *_: state_reply())
-    with SessionDB(db_path=tmp_path / 'state.db') as db:
-        db.create_session('ws', 'cli', profile_name='default')
-        c.bind_session_state(session_db=db, session_id='ws')
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        db.sessions.create(NewSession(SessionId('ws'), 'cli', profile_name='default'))
+        c.bind_session_state(persistence=db, session_id='ws')
         rows = history()
-        db.append_messages_batch('ws', copy.deepcopy(rows))
+        db.messages.append_batch('ws', tuple(NewMessage.from_live(row) for row in rows))
         first = c.compress(copy.deepcopy(rows), force=True)
         assert first != rows, c._last_summary_error
         installed = '\n'.join(str(r.get('content', '')) for r in first
@@ -305,28 +308,27 @@ def test_work_state_pointer_requires_real_todo_artifact_read(tmp_path, monkeypat
         # The session-scoped query walks by id, so the todo pair must be
         # appended AFTER the history rows for a session that has one.
         _append_todo_pair(db, 'ws', 'ws-1')
-        assert json.loads(db.get_latest_todo_result('ws'))['revision'] == 2
-        second_input = db.get_messages_as_conversation('ws', repair_alternation=True)
+        assert json.loads(db.messages.latest_todo_result('ws', max_chars=100000))['revision'] == 2
+        second_input = [row.as_openai_message() for row in db.messages.read_conversation(
+            'ws', ConversationRequest(repair_alternation=True))]
         second = c.compress(copy.deepcopy(second_input), force=True)
         assert second != second_input, c._last_summary_error
         installed2 = '\n'.join(str(r.get('content', '')) for r in second
                                if is_compaction_summary_message(r))
         assert WORK_STATE_POINTER_HEADING in installed2
-        assert 'get_latest_todo_result' in installed2
+        assert 'MessageRepository.latest_todo_result' in installed2
         assert 'grants no permissions' in installed2
         # Independent readback: the artifact itself is still consumable without
         # any model summary — that is the whole point of the authority split.
-        assert json.loads(db.get_latest_todo_result('ws'))['todos'][0]['text'] == 'Review KESTREL receipt'
-        db.archive_and_compact('ws', copy.deepcopy(second))
+        assert json.loads(db.messages.latest_todo_result('ws', max_chars=100000))['todos'][0]['text'] == 'Review KESTREL receipt'
+        db.messages.compact('ws', tuple(NewMessage.from_live(row) for row in second))
 
-    with SessionDB(db_path=tmp_path / 'state.db') as reopened:
+    with open_persistence(profile_scope(home=tmp_path)) as reopened:
         # The pointer survives durable reopen and the artifact stays readable.
-        with reopened._read_ctx() as conn:
-            stored = '\n'.join(row['content'] or '' for row in conn.execute(
-                "SELECT content FROM messages WHERE session_id='ws' "
-                "AND COALESCE(_compressed_summary,0)=1 ORDER BY id"))
+        stored = '\n'.join(row.content or '' for row in reopened.messages.read_transcript('ws')
+                           if row.compressed_summary)
         assert WORK_STATE_POINTER_HEADING in stored
-        assert json.loads(reopened.get_latest_todo_result('ws'))['revision'] == 2
+        assert json.loads(reopened.messages.latest_todo_result('ws', max_chars=100000))['revision'] == 2
 
 
 def test_unbound_session_emits_no_pointer(best_effort_compressor):
@@ -359,13 +361,14 @@ def test_verified_artifact_stands_in_for_absent_state_section(tmp_path, monkeypa
     body_only = (f'{HISTORICAL_TASK_HEADING}\n{_NO_USER_TASK_SENTINEL}\n\n'
                  '## Overview\nRoutine work, no state section authored.')
     monkeypatch.setattr(c, '_call_summary_llm', lambda *_: body_only)
-    with SessionDB(db_path=tmp_path / 'state.db') as db:
-        db.create_session('aa', 'cli', profile_name='default')
-        c.bind_session_state(session_db=db, session_id='aa')
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        db.sessions.create(NewSession(SessionId('aa'), 'cli', profile_name='default'))
+        c.bind_session_state(persistence=db, session_id='aa')
         rows = history()
-        db.append_messages_batch('aa', copy.deepcopy(rows))
+        db.messages.append_batch('aa', tuple(NewMessage.from_live(row) for row in rows))
         _append_todo_pair(db, 'aa', 'aa-1')
-        current = db.get_messages_as_conversation('aa', repair_alternation=True)
+        current = [row.as_openai_message() for row in db.messages.read_conversation(
+            'aa', ConversationRequest(repair_alternation=True))]
         result = c.compress(copy.deepcopy(current), force=True)
         assert result != current, c._last_summary_error
         assert not c._last_compress_aborted
@@ -374,12 +377,13 @@ def test_verified_artifact_stands_in_for_absent_state_section(tmp_path, monkeypa
         assert WORK_STATE_POINTER_HEADING in installed
         assert OPERATIONAL_STATE_HEADING not in installed, 'no state fabricated'
         # Artifact still independently readable — the authority split holds.
-        assert json.loads(db.get_latest_todo_result('aa'))['revision'] == 2
+        assert json.loads(db.messages.latest_todo_result('aa', max_chars=100000))['revision'] == 2
 
         # Partial state section present: refuses even with the verified artifact.
         partial = body_only + '\n' + OPERATIONAL_STATE_HEADING + '\nCurrent Task: half\n'
         monkeypatch.setattr(c, '_call_summary_llm', lambda *_: partial)
-        again_input = db.get_messages_as_conversation('aa', repair_alternation=True)
+        again_input = [row.as_openai_message() for row in db.messages.read_conversation(
+            'aa', ConversationRequest(repair_alternation=True))]
         before2 = copy.deepcopy(again_input)
         result2 = c.compress(copy.deepcopy(again_input), force=True)
         assert result2 != before2, c._last_summary_error

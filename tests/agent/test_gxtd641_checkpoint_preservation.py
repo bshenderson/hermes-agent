@@ -133,7 +133,7 @@ def test_salvage_never_cuts_canonical_records():
 def make_agent(compressor, db=None):
     from run_agent import AIAgent
     agent = AIAgent(api_key='nonfunctional-fixture', base_url='http://127.0.0.1:1/v1',
-                    model='fixture', quiet_mode=True, session_db=db,
+                    model='fixture', quiet_mode=True, persistence=db,
                     session_id='source-session', skip_context_files=True, skip_memory=True)
     agent.context_compressor = compressor
     agent._compression_feasibility_checked = True
@@ -170,23 +170,23 @@ def test_final_installation_rejects_missing_records_before_effects(compressor, d
 
 @pytest.mark.parametrize('in_place', [True, False])
 def test_real_commit_reload_and_second_compaction_preserve_original_oracle(compressor, tmp_path, in_place):
-    from hermes_state import SessionDB
-    db = SessionDB(db_path=tmp_path / 'checkpoint.db')
+    from tests._fixtures.store_support import append_rows, conversation, create_session, open_store
+    db = open_store(tmp_path)
     line = 'Harbor: Lena must deliver the archive December 7.'
     try:
-        db.create_session('source-session', source='fixture')
-        db.append_messages_batch('source-session', history(line))
-        original = db.get_messages_as_conversation('source-session')
+        create_session(db, 'source-session', source='fixture')
+        append_rows(db, 'source-session', history(line))
+        original = conversation(db, 'source-session')
         agent = make_agent(compressor, db)
         agent.compression_in_place = in_place
         result, _ = agent._compress_context(copy.deepcopy(original), 'Existing system prompt.', force=True)
         assert result != original, compressor._last_summary_error
-        loaded = db.get_messages_as_conversation(agent.session_id)
+        loaded = conversation(db, agent.session_id)
         assert line in ledger(loaded)
         assert ledger(loaded) == ledger(result)
         db.close()
-        db = SessionDB(db_path=tmp_path / 'checkpoint.db')
-        reloaded = db.get_messages_as_conversation(agent.session_id, repair_alternation=True)
+        db = open_store(tmp_path)
+        reloaded = conversation(db, agent.session_id, repair_alternation=True)
         assert line in ledger(reloaded)
         fresh = ContextCompressor(model='fixture', config_context_length=100000, quiet_mode=True,
                                   protect_first_n=1, protect_last_n=2, abort_on_summary_failure=True)

@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.gateway.test_protected_event_ingress import ingress, post, submission
+from tests.gateway.test_protected_event_ingress import ingress, post, submission, persist_history, load_history
+from persistence.conversation.messages import NewMessage, TranscriptRead, TranscriptView
 
 
 @pytest.mark.parametrize('protected', [True, False], ids=['protected', 'ordinary'])
@@ -18,23 +19,26 @@ def test_unavailable_owner_refuses_cut_before_admission_and_survives_recovery(tm
             if protected:
                 assert (await post(channel, submission())).status == 201
             else:
-                db.append_message('source-session', 'user', 'ordinary first ask')
-            db.append_messages_batch('source-session', [
+                db.messages.append('source-session', NewMessage('user', 'ordinary first ask'))
+            persist_history(db, 'source-session', [
                 {'role': 'assistant', 'content': 'acknowledged'},
                 {'role': 'user', 'content': 'next ask'},
                 {'role': 'assistant', 'content': 'next answer'}])
-            home = tmp_path / 'owner'
-            home.mkdir()
-            (home / 'state.db').symlink_to(tmp_path / 'events.db')
-            assert (home / 'state.db').resolve() == (tmp_path / 'events.db').resolve()
-            loaded = db.get_messages_as_conversation('source-session', include_row_ids=True, repair_alternation=True)
-            before = db.get_messages('source-session', include_inactive=True)
-            session_before = db.get_session('source-session')
+            home = tmp_path
+            loaded = load_history(db, 'source-session', include_row_ids=True, repair_alternation=True)
+            before = db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL))
+            session_before = db.sessions.get('source-session')
             from tui_gateway import server
             from hermes_cli import backend_retirement
-            import hermes_state_registry
+            import persistence_assembly
             monkeypatch.setattr(backend_retirement, 'retirement', backend_retirement.RetirementFence())
             monkeypatch.setattr(server, '_db', db)
+            owner_activity = []
+            require_owner = server._require_transcript_owner
+            def observed_owner(record):
+                require_owner(record)
+                owner_activity.append(record['last_active'])
+            monkeypatch.setattr(server, '_require_transcript_owner', observed_owner)
             agent = SimpleNamespace(_session_messages=copy.deepcopy(loaded))
             session = {'session_key': 'source-session', 'profile_home': str(home),
                        'history': copy.deepcopy(loaded), 'history_version': 7,
@@ -46,7 +50,7 @@ def test_unavailable_owner_refuses_cut_before_admission_and_survives_recovery(tm
             with monkeypatch.context() as fault:
                 def unavailable(*args, **kwargs):
                     raise OSError('disposable owning DB open failure')
-                fault.setattr(hermes_state_registry, 'acquire', unavailable)
+                fault.setattr(persistence_assembly, 'open_persistence', unavailable)
                 error, fields = server._lock_in_submit_turn(
                     'request', 'source-session', session, 'replacement', params, True, None, None, None)
             assert error is not None, 'unavailable owning store admitted a destructive edit'
@@ -58,10 +62,12 @@ def test_unavailable_owner_refuses_cut_before_admission_and_survives_recovery(tm
             assert session['running'] is False
             assert 'inflight_turn' not in session
             assert '_turn_cancel_requested' not in session
-            assert 'last_active' not in session
+            # Upstream owner reclamation refreshes activity even on refusal to
+            # prevent idle lease release. No submit-time activity may replace it.
+            assert owner_activity and session['last_active'] == owner_activity[-1]
             assert agent._session_messages == loaded
             server._adopt_out_of_band_turns(session)
             assert session['history'] == loaded
-            assert db.get_messages('source-session', include_inactive=True) == before
-            assert db.get_session('source-session') == session_before
+            assert db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL)) == before
+            assert db.sessions.get('source-session') == session_before
     asyncio.run(run())

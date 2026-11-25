@@ -15,7 +15,10 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
-from hermes_state import SessionDB
+from persistence import SessionId
+from persistence.conversation.messages import TranscriptRead, TranscriptView
+from persistence.conversation.sessions import NewSession
+from persistence_assembly import open_persistence, profile_scope
 from tests.gateway.test_protected_event_ingress import signing_bytes, submission
 
 
@@ -31,16 +34,17 @@ def test_signed_ingress_profile_middleware(tmp_path, monkeypatch, topology):
     monkeypatch.setenv('HERMES_HOME', str(home))
     key = Ed25519PrivateKey.generate()
     public = base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
-    db = SessionDB(home / 'state.db')
-    db.create_session('source-session', source='api_server')
+    db = open_persistence(profile_scope(home=home))
+    db.sessions.create(NewSession(SessionId('source-session'), 'api_server',
+                                  profile_name='researcher' if topology == 'standalone-named' else 'default'))
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={
         'key': 'disposable-api-bearer', 'protected_event_public_keys': [public]}))
     adapter._session_db = db
     if topology == 'multiplex':
         from gateway.session_authorities import SessionAuthorities
         authorities = SessionAuthorities(home, multiplexed=True)
-        authorities.add(home, SimpleNamespace(db=db, profile_id=str(home)))
-        assert authorities.for_home(home).db is db
+        authorities.add(home, SimpleNamespace(persistence=db, profile_id=str(home)))
+        assert authorities.for_home(home).persistence is db
         assert authorities.for_home(named) is None
         adapter.gateway_runner = SimpleNamespace(
             config=SimpleNamespace(multiplex_profiles=True), session_authorities=authorities)
@@ -59,11 +63,11 @@ def test_signed_ingress_profile_middleware(tmp_path, monkeypatch, topology):
             own = '/p/researcher' if topology == 'standalone-named' else '/p/default'
             response = await send(own, 'own-profile')
             assert response.status == 201, await response.text()
-            original = db.get_messages('source-session', include_inactive=True)
+            original = db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL))
             foreign = '/p/default' if topology == 'standalone-named' else '/p/researcher'
             response = await send(foreign, 'foreign-profile')
             assert response.status == (403 if topology == 'multiplex' else 404), await response.text()
-            assert db.get_messages('source-session', include_inactive=True) == original
+            assert db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL)) == original
             assert (await send('/p/ghost', 'unknown-profile')).status == 404
             response = await send('', 'bare-native-profile')
             assert response.status == 201, await response.text()

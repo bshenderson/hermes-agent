@@ -51,13 +51,18 @@ def summarize_bounded(source, build_prompt, call, *, context_length, output_toke
         raise ValueError('invalid compression budget')
 
     chunk_prompt = build_chunk_prompt or build_prompt
-    overhead = max(len(build_prompt('').encode('utf-8')), len(chunk_prompt('').encode('utf-8')))
+    def prompt_bytes(prompt):
+        if isinstance(prompt, str):
+            return len(prompt.encode('utf-8'))
+        import json
+        return len(json.dumps(prompt, ensure_ascii=False).encode('utf-8'))
+    overhead = max(prompt_bytes(build_prompt('')), prompt_bytes(chunk_prompt('')))
     available = budget - overhead
     if available < 256:
         raise ValueError('compression instructions exceed input budget')
     def invoke(text, *, chunk=False):
         prompt = (chunk_prompt if chunk else build_prompt)(text)
-        if len(prompt.encode('utf-8')) > budget:
+        if prompt_bytes(prompt) > budget:
             raise ValueError('compression prompt exceeds input budget')
         result = call(prompt)
         if not isinstance(result, str) or not result.strip():

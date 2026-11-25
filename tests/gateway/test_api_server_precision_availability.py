@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 import ast
+import threading
 import sys
 from types import SimpleNamespace, ModuleType
 from unittest.mock import patch
@@ -63,7 +64,9 @@ class PrecisionAvailabilityTests(unittest.TestCase):
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(SOURCE.parent / 'api_server.py'), 'exec'), env)
         owner = SimpleNamespace(_select_agent_runtime=lambda kw,m,**k: (m,None,None,None),
             _resolve_provider_runtime=lambda *a,**k: {'provider': 'openai-codex', 'api_key': 'cloud-secret-sentinel', 'base_url': 'https://cloud.invalid'},
-            _ensure_session_db=lambda: None, _memory_sessions=SimpleNamespace(checkout=lambda _: None))
+            _ensure_store=lambda: None, gateway_runner=None, _session_db=None,
+            _session_db_cache_lock=threading.Lock(), _session_db_cache_closed=False, _home_stores={},
+            _memory_sessions=SimpleNamespace(checkout=lambda _: None))
         imports = {'gateway.run': gateway, 'run_agent': SimpleNamespace(AIAgent=constructor),
             'hermes_cli.tools_config': SimpleNamespace(_get_platform_tools=lambda *a: ['file']),
             'gateway.platforms.api_server_precision_availability': helper}

@@ -16,7 +16,10 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
-from hermes_state import SessionDB
+from persistence import SessionId
+from persistence.conversation.messages import NewMessage, ConversationRequest, TranscriptRead, TranscriptView
+from persistence.conversation.sessions import NewSession
+from persistence_assembly import open_persistence, profile_scope
 from tests.agent.test_gxtd641_checkpoint_preservation import compressor, history, make_agent
 
 
@@ -30,12 +33,21 @@ def submission(text='Shipment: Cedar archive.\nPark this until Barry approves th
                      kind='hold', text=text, corrects=[]), **updates)
 
 
+def persist_history(store, session_id, messages):
+    return store.messages.append_batch(session_id, tuple(NewMessage.from_live(row) for row in messages))
+
+
+def load_history(store, session_id, *, repair_alternation=False, include_row_ids=False):
+    return [row.as_openai_message() for row in store.messages.read_conversation(
+        session_id, ConversationRequest(repair_alternation=repair_alternation, include_row_ids=include_row_ids))]
+
+
 @asynccontextmanager
 async def ingress(tmp_path):
     key = Ed25519PrivateKey.generate()
     public = base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
-    db = SessionDB(tmp_path / 'events.db')
-    db.create_session('source-session', source='api_server')
+    db = open_persistence(profile_scope(home=tmp_path))
+    db.sessions.create(NewSession(SessionId('source-session'), 'api_server', profile_name='default'))
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={
         'key': 'disposable-api-bearer', 'protected_event_public_keys': [public]}))
     adapter._session_db = db
@@ -72,8 +84,8 @@ async def signed_ingress_real_compaction_close_reopen(ingress, compressor, tmp_p
     assert event['session_id'] == 'source-session'
     assert event['source_uid'] and event['issuer'] and event['order'] == 1
     db = ingress[2]
-    db.append_messages_batch('source-session', history('plain archival data')[1:])
-    original = db.get_messages_as_conversation('source-session', repair_alternation=True)
+    db.messages.append_batch('source-session', tuple(NewMessage.from_live(row) for row in history('plain archival data')[1:]))
+    original = [row.as_openai_message() for row in db.messages.read_conversation('source-session', ConversationRequest(repair_alternation=True))]
     before = copy.deepcopy(original)
     agent = make_agent(compressor, db)
     agent.compression_in_place = True
@@ -83,12 +95,12 @@ async def signed_ingress_real_compaction_close_reopen(ingress, compressor, tmp_p
     assert collect_events(compressor, result) == [event]
     assert any(decode_events(row.get('content', '')) == [event] for row in result)
     # Separate connection exercises durable metadata reload, not returned live dictionaries.
-    reopened = SessionDB(tmp_path / 'events.db')
+    reopened = open_persistence(profile_scope(home=tmp_path))
     try:
-        restored = reopened.get_messages_as_conversation('source-session', repair_alternation=True)
+        restored = [row.as_openai_message() for row in reopened.messages.read_conversation('source-session', ConversationRequest(repair_alternation=True))]
         assert collect_events(compressor, restored) == [event]
-        raw = reopened.get_messages('source-session', include_compacted=True)
-        assert any(row['message_uid'] == event['source_uid'] and row['content'] == body['text'] for row in raw)
+        raw = reopened.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.DISPLAY))
+        assert any(row.message_uid == event['source_uid'] and row.content == body['text'] for row in raw)
     finally:
         reopened.close()
 
@@ -98,9 +110,9 @@ def test_event_bearing_rotation_refuses_original(compressor, tmp_path):
         async with ingress(tmp_path) as channel:
             assert (await post(channel, submission())).status == 201
             db = channel[2]
-            db.append_messages_batch('source-session', history('plain archive')[1:])
+            db.messages.append_batch('source-session', tuple(NewMessage.from_live(row) for row in history('plain archive')[1:]))
             # Match the caller's canonical durable snapshot, not the repaired display projection.
-            original = db.get_messages_as_conversation('source-session')
+            original = [row.as_openai_message() for row in db.messages.read_conversation('source-session')]
             agent = make_agent(compressor, db)
             agent.compression_in_place = False
             result, _ = agent._compress_context(copy.deepcopy(original), 'Existing system prompt.', force=True)
@@ -115,8 +127,8 @@ def test_detached_checkpoint_cannot_silently_lose_events(compressor, tmp_path):
         from agent.protected_events import FIELD
         async with ingress(tmp_path) as channel:
             assert (await post(channel, submission())).status == 201
-            channel[2].append_messages_batch('source-session', history('plain archive')[1:])
-            original = channel[2].get_messages_as_conversation('source-session', repair_alternation=True)
+            channel[2].messages.append_batch('source-session', tuple(NewMessage.from_live(row) for row in history('plain archive')[1:]))
+            original = [row.as_openai_message() for row in channel[2].messages.read_conversation('source-session', ConversationRequest(repair_alternation=True))]
             first = compressor.compress(copy.deepcopy(original), force=True)
             assert first != original, compressor._last_summary_error
             for row in first:

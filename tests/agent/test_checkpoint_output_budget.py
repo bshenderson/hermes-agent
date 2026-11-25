@@ -168,7 +168,7 @@ def test_real_commit_reload_keeps_custody_with_bounded_excerpts(complete_case, t
     from hermes_state import SessionDB
     from run_agent import AIAgent
     messages, compressor, obligations = complete_case
-    path = tmp_path / 'checkpoint.db'
+    path = tmp_path / 'state.db'
     db = SessionDB(db_path=path)
     try:
         db.create_session('source-session', source='fixture')

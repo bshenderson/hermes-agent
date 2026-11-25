@@ -283,7 +283,7 @@ def test_real_ingress_history_size_moves_route_through_prepared_accounting(monke
     monkeypatch.setattr(gateway, '_checkpoint_agent_kwargs', lambda _: {})
     monkeypatch.setattr(gateway, '_current_max_iterations', lambda: 4)
     monkeypatch.setattr(tools_config, '_get_platform_tools', lambda *_: [])
-    monkeypatch.setattr(adapter, '_ensure_session_db', lambda: None)
+    monkeypatch.setattr(adapter, '_ensure_store', lambda: None)
     monkeypatch.setattr(adapter, '_select_agent_runtime', lambda kw, model, **_: (model, None, None, None))
     monkeypatch.setattr(adapter, '_profile_scope', lambda _: nullcontext())
     monkeypatch.setattr(adapter, '_expected_api_key', lambda: 'fixture-authenticated-key')
@@ -424,6 +424,7 @@ def test_real_assembly_late_growth_is_terminal_break_with_fresh_estimate():
         agent._sanitize_api_messages = lambda v: v
         agent._emit_warning = agent._vprint = lambda *a, **k: None
         agent._drop_thinking_only_and_merge_users = lambda v, **k: v
+        agent._empty_response_retry_hint = None
         return agent
 
     history = [{'role': 'user', 'content': 'hello'},

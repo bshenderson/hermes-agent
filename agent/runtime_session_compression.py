@@ -9,7 +9,7 @@ def _handoff_rows(messages):
     that SessionDB's insert simply never reads. The owner's boundary stays closed; sending those keys
     would fail the receipt and leave the journal stuck pending, refusing every later write.
     """
-    from hermes_state_runtime import HANDOFF_MESSAGE_FIELDS
+    from persistence.workers.vocabulary import HANDOFF_MESSAGE_FIELDS
     return [{k: v for k, v in m.items() if k in HANDOFF_MESSAGE_FIELDS} if isinstance(m, dict) else m
             for m in messages]
 
@@ -59,9 +59,11 @@ class RuntimeSessionCompressionMixin:
 
     def get_messages_as_conversation(self, session_id, include_ancestors=False, include_inactive=False,
                                      repair_alternation=False, include_row_ids=False, include_compacted=False):
-        return self._apply('compression.history', dict(target=session_id, include_ancestors=include_ancestors,
+        messages = self._apply('compression.history', dict(target=session_id, include_ancestors=include_ancestors,
             include_inactive=include_inactive, repair_alternation=repair_alternation,
             include_row_ids=include_row_ids, include_compacted=include_compacted))['messages']
+        from agent.protected_events import restore_owner_streams
+        return restore_owner_streams(messages, session_id)
 
     def get_active_message_watermark(self, session_id):
         self._session(session_id)
@@ -79,7 +81,7 @@ class RuntimeSessionCompressionMixin:
         # The lease-less staleness fence (#124102): the owner re-verifies the caller's held rows
         # inside its commit transaction. The projection keeps the closed handoff fields plus the
         # persistence marker the CAS compare reads; anything else stays worker-local.
-        from hermes_state_runtime import HANDOFF_MESSAGE_FIELDS
+        from persistence.workers.vocabulary import HANDOFF_MESSAGE_FIELDS
         cas = None if held_for_cas is None else [
             {k: v for k, v in m.items()
              if k in HANDOFF_MESSAGE_FIELDS or k == '_db_persisted'}
@@ -90,6 +92,9 @@ class RuntimeSessionCompressionMixin:
             unresolved_held=unresolved, held_for_cas=cas))
         from agent.runtime_session_store import apply_row_annotations
         apply_row_annotations(compacted_messages, result['annotations'])
+        # The worker's local context version (the prompt-cache clock's compaction witness): every
+        # in-place rewrite archives through here, a prune or micro-compaction included.
+        self.context_rewrites = getattr(self, 'context_rewrites', 0) + 1
         return result['value']
 
     def publish_compression_child(self, *, parent_session_id, child_session_id, source, messages,

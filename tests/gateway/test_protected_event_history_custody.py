@@ -1,6 +1,7 @@
 """GXTD-810 B1/B2 production-loader and destructive-history integration."""
 import asyncio
 import copy
+import sqlite3
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,10 +10,14 @@ import pytest
 
 from agent.protected_events import collect_events, decode_events
 from tests.agent.test_gxtd641_checkpoint_preservation import compressor, history, make_agent
-from tests.gateway.test_protected_event_ingress import ingress, post, submission
+from tests.gateway.test_protected_event_ingress import ingress, post, submission, persist_history, load_history
+from persistence.conversation.messages import NewMessage, ReplaceMode, TranscriptRead, TranscriptView
+from tests.agent.test_gxtd811_best_effort_compression import best_effort_compressor
 
 
-def test_native_api_reload_supports_second_real_in_place_commit(compressor, tmp_path):
+def test_native_api_reload_supports_second_real_in_place_commit(best_effort_compressor, tmp_path):
+    # This oracle substitutes a prose summary, not a source-quote selector.
+    compressor = best_effort_compressor
     async def run():
         async with ingress(tmp_path) as channel:
             response = await post(channel, submission())
@@ -26,13 +31,13 @@ def test_native_api_reload_supports_second_real_in_place_commit(compressor, tmp_
             agent = make_agent(compressor, db)
             agent.compression_in_place = True
             for _ in range(2):
-                db.append_messages_batch('source-session', history('plain archival data')[1:])
+                persist_history(db, 'source-session', history('plain archival data')[1:])
                 original = await adapter._conversation_history_for_session('source-session')
-                active_before = db.get_active_message_ids('source-session')
+                active_before = tuple(row.id for row in db.messages.read_transcript('source-session'))
                 result, _ = agent._compress_context(copy.deepcopy(original), 'Existing system prompt.', force=True)
                 assert result != original, compressor._last_summary_error
                 assert len(str(result)) < len(str(original))
-                assert db.get_active_message_ids('source-session') != active_before
+                assert tuple(row.id for row in db.messages.read_transcript('source-session')) != active_before
                 reloaded = await adapter._conversation_history_for_session('source-session')
                 assert collect_events(compressor, reloaded) == [event]
                 assert any(decode_events(row.get('content', '')) == [event] for row in reloaded)
@@ -40,36 +45,38 @@ def test_native_api_reload_supports_second_real_in_place_commit(compressor, tmp_
 
 
 @pytest.mark.parametrize('warm', [False, True], ids=['empty-prefix', 'warm-prefix'])
-@pytest.mark.parametrize('operation', ['rewind-user', 'rewind-row', 'replace', 'archive-edit', 'clear'])
+@pytest.mark.parametrize('operation', ['rewind-user', 'rewind-cold', 'replace', 'archive-edit', 'clear'])
 def test_event_history_mutation_refuses_before_effect(compressor, tmp_path, monkeypatch, warm, operation):
     async def run():
         async with ingress(tmp_path) as channel:
             assert (await post(channel, submission())).status == 201
             db = channel[2]
-            db.append_messages_batch('source-session', [
+            persist_history(db, 'source-session', [
                 {'role': 'assistant', 'content': 'acknowledged'},
                 {'role': 'user', 'content': 'ordinary next ask'},
                 {'role': 'assistant', 'content': 'ordinary answer'}])
-            before = db.get_messages('source-session', include_inactive=True)
-            session_before = db.get_session('source-session')
-            history_before = db.get_messages_as_conversation('source-session', include_row_ids=True, repair_alternation=True)
+            before = db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL))
+            session_before = db.sessions.get('source-session')
+            history_before = load_history(db, 'source-session', include_row_ids=True, repair_alternation=True)
             warm_history = copy.deepcopy(history_before)
             ordinal = 1 if warm else 0
             target = [m for m in history_before if m['role'] == 'user'][ordinal]
             prefix = warm_history[:warm_history.index(target)]
             with pytest.raises(ValueError, match='protected event'):
                 if operation == 'rewind-user':
-                    db.rewind_user_turn('source-session', ordinal, warm_history=warm_history)
-                elif operation == 'rewind-row':
-                    db.rewind_to_message('source-session', target['_row_id'])
+                    db.messages.rewind_user_turn('source-session', ordinal, warm_history=warm_history)
+                elif operation == 'rewind-cold':
+                    plan = db.messages.plan_user_turn_rewind('source-session', ordinal)
+                    assert plan.target_row_id == target['_row_id']
+                    db.messages.rewind_user_turn('source-session', ordinal)
                 elif operation in ('replace', 'archive-edit'):
-                    db.replace_messages('source-session', prefix, active_only=True,
-                                        archive_dropped=operation == 'archive-edit')
+                    db.messages.replace_transcript('source-session', tuple(NewMessage.from_live(row) for row in prefix),
+                        ReplaceMode.ARCHIVE_DROPPED if operation == 'archive-edit' else ReplaceMode.PRESERVE_EXISTING_ARCHIVE)
                 else:
-                    db.clear_messages('source-session')
+                    db.messages.clear_transcript('source-session')
             assert warm_history == history_before
-            assert db.get_messages('source-session', include_inactive=True) == before
-            assert db.get_session('source-session') == session_before
+            assert db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL)) == before
+            assert db.sessions.get('source-session') == session_before
             from gateway.config import PlatformConfig
             from gateway.platforms.api_server import APIServerAdapter
             adapter = APIServerAdapter(PlatformConfig(enabled=True))
@@ -94,8 +101,8 @@ def test_native_chat_refuses_custody_load_failure_before_run_agent(tmp_path, mon
             assert (await post(channel, submission())).status == 201
             # Simulate a previously truncated durable carrier, not a forged event.
             db = channel[2]
-            db._execute_write(lambda conn: conn.execute(
-                "UPDATE messages SET active = 0 WHERE session_id = 'source-session'"))
+            with sqlite3.connect(tmp_path / 'state.db') as conn:
+                conn.execute("UPDATE messages SET active = 0 WHERE session_id = 'source-session'")
             # The fixture route is the production authenticated chat entrypoint.
             from gateway.platforms.api_server import APIServerAdapter
             admitted = AsyncMock(return_value=({'final_response': 'UNSAFE'}, {}))
@@ -117,17 +124,17 @@ def test_actual_tui_history_paths_preserve_warm_state(tmp_path, monkeypatch, war
             if events:
                 assert (await post(channel, submission())).status == 201
             else:
-                db.append_message('source-session', 'user', 'ordinary first ask')
-            db.append_messages_batch('source-session', [
+                db.messages.append('source-session', NewMessage('user', 'ordinary first ask'))
+            persist_history(db, 'source-session', [
                 {'role': 'assistant', 'content': 'acknowledged'},
                 {'role': 'user', 'content': 'next ask'},
                 {'role': 'assistant', 'content': 'next answer'}])
             from tui_gateway import server
             monkeypatch.setattr(server, '_db', db)
-            loaded = db.get_messages_as_conversation('source-session', include_row_ids=True, repair_alternation=True)
+            loaded = load_history(db, 'source-session', include_row_ids=True, repair_alternation=True)
             session = {'session_key': 'source-session', 'history': copy.deepcopy(loaded),
                        'history_version': 7, 'agent': SimpleNamespace(_session_messages=copy.deepcopy(loaded))}
-            before = db.get_messages('source-session', include_inactive=True)
+            before = db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL))
             ordinal = 1 if warm else 0
             if operation == 'rewind':
                 if events:
@@ -149,7 +156,7 @@ def test_actual_tui_history_paths_preserve_warm_state(tmp_path, monkeypatch, war
                 assert session['history'] == loaded
                 assert session['agent']._session_messages == loaded
                 assert session['history_version'] == 7
-                assert db.get_messages('source-session', include_inactive=True) == before
+                assert db.messages.read_transcript('source-session', TranscriptRead(view=TranscriptView.ALL)) == before
             else:
                 assert len(session['history']) == (2 if warm else 0)
     asyncio.run(run())

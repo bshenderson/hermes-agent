@@ -1,5 +1,5 @@
 """Explicit operator-only protected input, never a model/tool metadata channel."""
-import asyncio
+
 import base64
 import binascii
 import hashlib
@@ -9,8 +9,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent.protected_events import signing_bytes, validate_request
-from hermes_state_protected_events import append_verified_event
-from hermes_state_errors import SessionTurnLeaseLostError, SessionCompressionInProgressError, CompressionSessionClosedError
+from persistence import AuthorityRefusal, Conflict, PermanentStoreError, PersistenceError
 
 
 def http_routes(adapter):
@@ -56,9 +55,15 @@ async def receive_event(adapter, request):
         issuer = verified_issuer(keys, body, request.headers.get('X-Hermes-Operator-Signature', ''))
     except (ValueError, TypeError, UnicodeError):
         return web.json_response({'error': 'invalid or unauthorized protected event'}, status=400)
-    db = await adapter._ensure_session_db_async()
+    store = adapter._store_beside(await adapter._ensure_store_async())
+    if store is None:
+        return web.json_response({'error': 'protected event store unavailable'}, status=503)
     try:
-        event, inserted = await asyncio.to_thread(append_verified_event, db, body, issuer)
-    except (ValueError, SessionTurnLeaseLostError, SessionCompressionInProgressError, CompressionSessionClosedError) as error:
+        event, inserted = await store.aio.messages.append_verified_event(body, issuer)
+    except (ValueError, AuthorityRefusal, Conflict) as error:
         return web.json_response({'error': str(error)}, status=409)
+    except PermanentStoreError:
+        return web.json_response({'error': 'protected event transaction failed'}, status=500)
+    except PersistenceError:
+        return web.json_response({'error': 'protected event store unavailable'}, status=503)
     return web.json_response({'event': event, 'inserted': inserted}, status=201 if inserted else 200)

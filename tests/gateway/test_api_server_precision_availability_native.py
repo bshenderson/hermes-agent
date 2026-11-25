@@ -40,7 +40,7 @@ class NativeConstructorTest(unittest.TestCase):
                          patch.object(gateway, '_checkpoint_agent_kwargs', return_value={}), \
                          patch.object(gateway, '_current_max_iterations', return_value=4), \
                          patch.object(tools_config, '_get_platform_tools', return_value=['file']), \
-                         patch.object(adapter, '_ensure_session_db', return_value=None), \
+                         patch.object(adapter, '_ensure_store', return_value=None), \
                          patch.object(adapter, '_resolve_provider_runtime', return_value={
                              'provider': 'openai-codex', 'api_key': 'cloud-sentinel',
                              'base_url': 'https://cloud.invalid', 'api_mode': 'codex_responses'}), \

@@ -8,7 +8,8 @@ import hashlib
 import json
 
 from agent.compression_preservation import CONTRACT, START, END, decode_records, encode_records
-from agent.context_compressor import _handoff_only_content, _redact_compaction_text
+from session_rules.turns import _handoff_only_content
+from agent.context_compressor import _redact_compaction_text
 from agent.protected_events import EventStream, decode_events, validate_stream
 
 MAX_ROWS = 4096
@@ -24,6 +25,10 @@ def _digest(value):
 
 
 def _snapshot(db, session_id, profile):
+    return db.messages.citation_snapshot(session_id, profile)
+
+
+def _snapshot_from_holder(db, session_id, profile):
     if any(not isinstance(value, str) or not value or len(value) > 128
            for value in (session_id, profile)):
         raise ValueError('citation owner identity required')

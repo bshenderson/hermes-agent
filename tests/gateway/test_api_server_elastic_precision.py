@@ -75,7 +75,7 @@ def constructor(monkeypatch):
     monkeypatch.setattr(gateway, '_checkpoint_agent_kwargs', lambda _: {})
     monkeypatch.setattr(gateway, '_current_max_iterations', lambda: 4)
     monkeypatch.setattr(tools_config, '_get_platform_tools', lambda *_: ['file'])
-    monkeypatch.setattr(adapter, '_ensure_session_db', lambda: None)
+    monkeypatch.setattr(adapter, '_ensure_store', lambda: None)
     monkeypatch.setattr(adapter, '_select_agent_runtime', lambda kw, model, **_: (model, None, None, None))
     resolver = Mock(side_effect=AssertionError('no cloud or credential resolution authorized'))
     monkeypatch.setattr(adapter, '_resolve_provider_runtime', resolver)
@@ -259,7 +259,7 @@ def test_real_delegate_producer_pins_substantial_sparky_not_parent_gemma(monkeyp
         'provider': 'custom', 'base_url': parent.base_url, 'api_key': 'fixture-child',
         'api_mode': 'chat_completions', 'request_overrides': {'extra_body': {'unrelated': 'preserve'}}})
     credentials = _resolve_delegation_credentials(cfg, parent)
-    monkeypatch.setattr('tools.delegate_tool._load_config', lambda: cfg)
+    monkeypatch.setattr('tools.delegate_tool_config._load_config', lambda: cfg)
     built = Mock(return_value=MagicMock())
     monkeypatch.setattr(run_agent, 'AIAgent', built)
     child = _build_child_agent(task_index=0, goal='substantial producer fixture', context=None,

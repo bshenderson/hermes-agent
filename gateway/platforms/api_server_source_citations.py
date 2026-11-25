@@ -1,6 +1,6 @@
 """Opt-in authenticated default-profile citation consumer; no model/tool authority."""
 import asyncio
-import sqlite3
+from persistence import PersistenceError
 
 from aiohttp import web
 
@@ -35,9 +35,9 @@ async def source_citations(adapter, request):
         if not isinstance(body, dict) or set(body) != {'checkpoint', 'citations'}:
             return web.json_response({'error': 'only checkpoint and citations are accepted'}, status=400)
     try:
-        db = await adapter._ensure_session_db_async()
+        db = adapter._store_beside(await adapter._ensure_store_async())
         if db is None:
-            return adapter._session_db_unavailable()
+            return web.json_response({'error': 'source citation store unavailable'}, status=503)
         session_id = request.match_info['session_id']
         if body is None:
             checkpoint = await asyncio.to_thread(checkpoint_identity, db, session_id=session_id, profile=profile)
@@ -47,6 +47,6 @@ async def source_citations(adapter, request):
                 profile=profile, checkpoint=body['checkpoint'], citations=body['citations'])
     except ValueError:
         return web.json_response({'error': 'source citation validation refused'}, status=409)
-    except (OSError, sqlite3.Error):
+    except (OSError, PersistenceError):
         return web.json_response({'error': 'source citation store unavailable'}, status=503)
     return web.json_response(result, headers={'Cache-Control': 'no-store'})

@@ -20,8 +20,12 @@ def test_full_middle_and_tool_arguments_reach_bounded_calls(tmp_path, monkeypatc
              'tool_calls': [{'function': {'name': 'example', 'arguments': long}}]}]
     prompts = []
     def call(prompt, started):
-        prompts.append(prompt)
-        assert len(prompt.encode()) + 12000 + 1024 <= 262144
+        # The summarizer request is either one prompt string (chunk extract) or the
+        # role-split message list (final reduce); bound the text either way.
+        text = prompt if isinstance(prompt, str) else '\n'.join(
+            str(message.get('content', '')) for message in prompt)
+        prompts.append(text)
+        assert len(text.encode()) + 12000 + 1024 <= 262144
         return '## Goal\nPreserve MIDDLE_KEEP_THIS from the synthetic transcript.'
     monkeypatch.setattr(c, '_call_summary_llm', call)
     serialized = c._serialize_for_summary(turns, lossless=True)

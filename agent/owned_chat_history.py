@@ -1,5 +1,10 @@
-"""Internal verified-chat provenance for native history read after turn admission."""
+"""Internal verified-chat provenance for native history read after turn admission.
+
+Everything here goes through the profile's storage interface handle: the rooted tip, the owner
+row and the lease are read from the store, never from a handle the caller happens to hold.
+"""
 from dataclasses import dataclass
+import time
 
 
 @dataclass(frozen=True)
@@ -9,25 +14,28 @@ class OwnedChatHistory:
     subject: str
     chat: str
 
-    def load_after_admission(self, db, session_id, holder):
+    def load_after_admission(self, store, session_id, holder):
         """Never move to another tip while holding a lease for the old session."""
+        from persistence.conversation.messages import ConversationRequest
+        from persistence.conversation.sessions import SessionId
+
         expected = (self.profile, self.subject, self.chat)
+        sid = SessionId(session_id)
 
         def validate():
-            if db.get_compression_tip(self.root_session_id) != session_id:
+            if store.lineage.tip(self.root_session_id) != session_id:
                 raise ValueError('Owned archive chat rotated before admission')
-            with db._read_ctx() as conn:
-                row = conn.execute(
-                    'SELECT profile_name,user_id,chat_id,ended_at FROM sessions WHERE id=?',
-                    (session_id,)).fetchone()
-                if row is None or tuple(row[:3]) != expected or row[3] is not None:
-                    raise ValueError('Owned archive chat owner or live state changed')
-            expiry = db.session_turn_lease_expires_at(session_id, holder)
-            import time
+            row = store.sessions.get(sid)
+            if row is None or (row.profile_name, row.user_id, row.chat_id) != expected or row.ended_at is not None:
+                raise ValueError('Owned archive chat owner or live state changed')
+            expiry = store.coordination.turn_lease_expires_at(session_id=sid, holder=holder)
             if expiry is None or expiry <= time.time():
                 raise ValueError('Owned archive chat lease no longer held')
 
         validate()
-        history = db.get_messages_as_conversation(session_id)
+        # Same replay projection the ordinary history loader uses: repaired alternation with the
+        # compaction summary markers kept, so a rotated handoff stays typed.
+        history = [message.as_openai_message()
+                   for message in store.messages.read_conversation(sid, ConversationRequest(repair_alternation=True))]
         validate()
         return history

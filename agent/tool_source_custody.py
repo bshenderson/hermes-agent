@@ -23,6 +23,12 @@ def _canonical(value):
 
 
 def _snapshot(db, session_id, through=None):
+    if db is None:
+        raise CompressionBudgetError('durable tool archive owner unavailable')
+    return db.messages.tool_archive_snapshot(session_id, through=through)
+
+
+def _snapshot_from_holder(db, session_id, through=None):
     if db is None or not isinstance(session_id, str) or not session_id or len(session_id) > 128:
         raise CompressionBudgetError('durable tool archive owner unavailable')
     try:
@@ -82,7 +88,7 @@ def resolve_reference(db, session_id, reference):
 def validate_references(compressor, records):
     for record in records:
         if is_reference(record):
-            resolve_reference(getattr(compressor, '_session_db', None), getattr(compressor, '_session_id', ''), record)
+            resolve_reference(getattr(compressor, '_persistence', None), getattr(compressor, '_session_id', ''), record)
 
 
 def archive_current_tools(compressor, messages, previous):
@@ -92,7 +98,7 @@ def archive_current_tools(compressor, messages, previous):
     if not tools:
         return [record for record in previous if is_reference(record)]
     from agent.context_compressor import _redact_compaction_text
-    db, sid = getattr(compressor, '_session_db', None), getattr(compressor, '_session_id', '')
+    db, sid = getattr(compressor, '_persistence', None), getattr(compressor, '_session_id', '')
     rows, digest = _snapshot(db, sid)
     for message in tools:
         text = message.get('content')

@@ -60,6 +60,10 @@ RECOVERY_MAX_ATTEMPTS = 10
 
 
 def _read_latest_row(db, session_id, key):
+    return db.messages.latest_archive_marker(session_id, key)
+
+
+def _read_latest_row_from_holder(db, session_id, key):
     """Newest row of THIS session carrying a typed key in display_metadata."""
     with db._read_ctx() as conn:
         return conn.execute(
@@ -127,6 +131,10 @@ def _matches_source_generation(original, generation):
 
 
 def _snapshot(db, session_id, profile, through=None):
+    return db.messages.archive_snapshot(session_id, profile, through=through)
+
+
+def _snapshot_from_holder(db, session_id, profile, through=None):
     if not isinstance(session_id, str) or not session_id or len(session_id)>128:
         raise ValueError('archive owner session invalid')
     if not isinstance(profile, str) or not profile or len(profile)>128:
@@ -243,7 +251,7 @@ class ArchiveRecall:
         # Use the real session tool; never accept a caller-supplied profile DB.
         from tools.session_search_tool import session_search
         from agent.context_compressor import _redact_compaction_text
-        result=session_search(db=self._db,current_session_id=self._session_id,session_id=self._session_id,
+        result=session_search(persistence=self._db,current_session_id=self._session_id,session_id=self._session_id,
                               around_message_id=matches[0]['id'],window=1)
         resolve(self._db,self._session_id,self._profile,reference)
         parsed=json.loads(result)
@@ -544,6 +552,15 @@ def resolve_presentation(db, session_id, profile):
     return None
 
 
+def _agent_store(agent):
+    """The agent's own storage interface handle: the writer handle beside its session store, whichever
+    construction path bound it (a public persistence handle, or a ``hermes_state`` stand-in that forwards
+    to one). ``_persistence`` is honoured for callers that set it explicitly."""
+    from agent.agent_init_session import agent_interface
+
+    return agent_interface(agent) or getattr(agent, '_persistence', None)
+
+
 def _try_recovery_probe(agent, session_id):
     """BD-2 bounded recovery for a transient store-fault restriction. Runs
     ONLY on a future recall or a successful compaction refresh, at most
@@ -563,7 +580,7 @@ def _try_recovery_probe(agent, session_id):
         return None
     state['attempts'] += 1
     state['last'] = now
-    db = getattr(agent, '_session_db', None)
+    db = _agent_store(agent)
     if db is None:
         return None
     try:
@@ -652,7 +669,7 @@ def attempt_transient_recovery_probe(agent) -> bool:
 def _bind_from_store(agent, session_id, *, require_carrier):
     if not session_id:
         return
-    db = getattr(agent, "_session_db", None)
+    db = _agent_store(agent)
     if db is None:
         return
     grant = _grant_from_agent(agent)
@@ -705,8 +722,8 @@ def participation(messages):
 
 def _owner_profile(db, session_id):
     try:
-        with db._read_ctx() as conn:
-            row = conn.execute('SELECT profile_name FROM sessions WHERE id=?', (session_id,)).fetchone()
+        session = db.sessions.get(session_id)
+        row = None if session is None else {'profile_name': session.profile_name}
     except Exception as error:
         # Transient store fault class (BD-2): may be cleared later ONLY by a
         # positive observation from the same owner/store, never by a probe

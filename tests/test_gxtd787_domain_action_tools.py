@@ -143,7 +143,7 @@ def test_real_api_constructor_uses_scoped_toolsets_and_ceiling(monkeypatch):
     monkeypatch.setattr('gateway.run._load_gateway_config',
                         lambda: {'api_server': {'domain_action_tools': POLICY}})
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
-    monkeypatch.setattr(adapter, '_ensure_session_db', lambda: None)
+    monkeypatch.setattr(adapter, '_ensure_store', lambda: None)
     monkeypatch.setattr(adapter, '_session_model_override_for', lambda *_: None)
     with context.bound(origin()):
         value = adapter._create_agent(session_id='scoped-fixture')
@@ -166,7 +166,7 @@ def test_failed_scope_construction_returns_memory_owner(monkeypatch):
     monkeypatch.setattr('gateway.run._load_gateway_config',
                         lambda: {'api_server': {'domain_action_tools': POLICY}})
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
-    monkeypatch.setattr(adapter, '_ensure_session_db', lambda: None)
+    monkeypatch.setattr(adapter, '_ensure_store', lambda: None)
     monkeypatch.setattr(adapter, '_session_model_override_for', lambda *_: None)
     checkin = Mock()
     adapter._memory_sessions = SimpleNamespace(checkout=lambda _session: None, checkin=checkin)

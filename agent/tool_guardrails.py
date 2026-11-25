@@ -21,16 +21,7 @@ from agent.tool_result_classification import (
 
 IDEMPOTENT_TOOL_NAMES = frozenset({
     "read_file", "search_files", "web_search", "web_extract", "session_search", "skill_view", "skills_list",
-    "browser_snapshot", "browser_console", "browser_get_images", "mcp_filesystem_read_file",
-    "mcp_filesystem_read_text_file", "mcp_filesystem_read_multiple_files", "mcp_filesystem_list_directory",
-    "mcp_filesystem_list_directory_with_sizes", "mcp_filesystem_directory_tree", "mcp_filesystem_get_file_info",
-    "mcp_filesystem_search_files",
-})
-
-MUTATING_TOOL_NAMES = frozenset({
-    "terminal", "execute_code", "write_file", "patch", "todo_list", "memory", "skill_manage",
-    "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_navigate",
-    "send_message", "cronjob_manage", "delegate_task", "process_manage",
+    "browser_snapshot", "browser_console", "browser_get_images",
 })
 
 # Pollers: legitimately re-invoked with identical args; the identical-call NOTICE never fires.
@@ -145,7 +136,6 @@ class ToolCallGuardrailConfig:
     web_evidence_synthesis_hint_after: int = 4
     web_search_synthesis_redirect_after: int = 4
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
-    mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
     loop_caps: LoopCapConfig = field(default_factory=LoopCapConfig)
 
     @classmethod
@@ -619,7 +609,7 @@ class ToolCallGuardrailController:
         )
 
     def _is_idempotent(self, tool_name: str) -> bool:
-        return tool_name not in self.config.mutating_tools and tool_name in self.config.idempotent_tools
+        return tool_name in self.config.idempotent_tools
 
     def observe_call(
         self, tool_name: str, args: Mapping[str, Any] | None, result: str | None,

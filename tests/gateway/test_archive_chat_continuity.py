@@ -12,11 +12,20 @@ from agent.chat_location import native_context, sign_context
 from agent.usage_anchor import capture_usage_anchor, restore_usage_anchor
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter, _api_request_profile
-from hermes_state import SessionDB
+from tests._fixtures.store_support import (
+    acquire_lease, append, compact, conversation, create_session, open_store, patch_model_config,
+    publish_child, read_one_store, release_lease, watermark, write_sql_store,
+)
 
 PROFILE = 'homelab-coordinator'
 KEY = 'fixture-key'
 CHAT = '11111111-1111-4111-8111-111111111111'
+
+
+def _shape(messages):
+    """Transcript rows the turn must receive, without the store's read-time row annotations."""
+    return [(m['role'], m.get('content'), m.get('tool_name'), m.get('tool_call_id'), m.get('tool_calls'))
+            for m in messages]
 
 
 def signed(messages, *, subject='owner-a', chat=CHAT, profile=PROFILE, stream=False):
@@ -33,10 +42,10 @@ def signed(messages, *, subject='owner-a', chat=CHAT, profile=PROFILE, stream=Fa
 def harness(tmp_path, monkeypatch):
     from agent import conversation_compression
     monkeypatch.setattr(conversation_compression, '_archive_receipts_enabled', lambda: True)
-    db = SessionDB(db_path=tmp_path / 'state.db')
+    store = open_store(tmp_path)
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={'key': KEY}))
     monkeypatch.setattr(adapter, '_expected_api_key', lambda: KEY)
-    monkeypatch.setattr(adapter, '_ensure_session_db_async', AsyncMock(return_value=db))
+    adapter._session_db = store
     calls = []
 
     async def run(**kwargs):
@@ -44,11 +53,11 @@ def harness(tmp_path, monkeypatch):
         sid = kwargs['session_id']
         if not kwargs['conversation_history']:
             # Controlled provider observation, never a native model dispatch.
-            db.create_session(sid, 'api_server', profile_name=PROFILE)
+            create_session(store, sid, 'api_server', profile_name=PROFILE)
             user = {'role': 'user', 'content': kwargs['user_message']}
-            db.append_message(sid, 'user', user['content'])
-            db.append_message(sid, 'assistant', 'READY')
-            db.patch_session_model_config(sid, {'_usage_anchor': capture_usage_anchor(5000, 10, [user])})
+            append(store, sid, 'user', user['content'])
+            append(store, sid, 'assistant', 'READY')
+            patch_model_config(store, sid, {'_usage_anchor': capture_usage_anchor(5000, 10, [user])})
         return {'final_response': 'READY', 'completed': True, 'session_id': sid}, {
             'input_tokens': 5000, 'output_tokens': 10, 'total_tokens': 5010}
 
@@ -64,23 +73,23 @@ def harness(tmp_path, monkeypatch):
         finally:
             _api_request_profile.reset(token)
 
-    yield db, adapter, calls, post
-    db.close()
+    yield store, adapter, calls, post
+    store.close()
 
 
 @pytest.mark.asyncio
 async def test_real_handler_restores_native_prefix_and_real_anchor_shape(harness):
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original raw UI text'}]
     assert (await post(signed(first))).status == 200
     sid = calls[0]['session_id']
-    native = db.get_messages_as_conversation(sid)
+    native = conversation(store, sid)
     assert native[0]['content'] != first[0]['content']  # server delivery guidance
     second = first + [{'role': 'assistant', 'content': 'READY'}, {'role': 'user', 'content': 'Next'}]
     assert (await post(signed(second))).status == 200
     assert calls[1]['session_id'] == sid
-    assert calls[1]['conversation_history'] == native
-    agent = SimpleNamespace(_usage_anchor=None, _persist_disabled=False, session_id=sid, _session_db=db)
+    assert _shape(calls[1]['conversation_history']) == _shape(native)
+    agent = SimpleNamespace(_usage_anchor=None, _persist_disabled=False, session_id=sid, _session_db=store, persistence=store)
     restore_usage_anchor(agent, calls[1]['conversation_history'])
     assert agent._usage_anchor is not None
 
@@ -186,7 +195,7 @@ async def test_signature_tampering_refuses_before_history(harness):
 @pytest.mark.asyncio
 async def test_store_fault_never_falls_back_to_client_history(harness, monkeypatch):
     _, adapter, calls, post = harness
-    monkeypatch.setattr(adapter, '_ensure_session_db_async', AsyncMock(return_value=None))
+    monkeypatch.setattr(adapter, '_ensure_store_async', AsyncMock(return_value=None))
     response = await post(signed([{'role': 'user', 'content': 'Hello'}]))
     assert response.status == 503
     assert calls == []
@@ -194,27 +203,27 @@ async def test_store_fault_never_falls_back_to_client_history(harness, monkeypat
 
 @pytest.mark.asyncio
 async def test_owned_chat_remains_owned_when_publication_opt_out(harness, monkeypatch):
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
-    native = db.get_messages_as_conversation(calls[0]['session_id'])
+    native = conversation(store, calls[0]['session_id'])
     monkeypatch.setattr('agent.conversation_compression._archive_receipts_enabled', lambda: False)
     assert (await post(signed(first + [{'role': 'assistant', 'content': 'READY'},
                                     {'role': 'user', 'content': 'Next'}]))).status == 200
-    assert calls[1]['conversation_history'] == native
+    assert _shape(calls[1]['conversation_history']) == _shape(native)
 
 
 @pytest.mark.asyncio
 async def test_unclaimed_disabled_chat_keeps_legacy_replay(harness, monkeypatch):
     from gateway.platforms.api_server import _derive_chat_session_id
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     monkeypatch.setattr('agent.conversation_compression._archive_receipts_enabled', lambda: False)
     history = [{'role': 'user', 'content': 'Original'}, {'role': 'assistant', 'content': 'Old'}]
     assert (await post(signed(history + [{'role': 'user', 'content': 'Next'}]))).status == 200
     assert calls[0]['conversation_history'] == history
     assert calls[0]['session_id'] == _derive_chat_session_id(None, 'Original', PROFILE)
-    with db._read_ctx() as conn:
-        assert conn.execute("SELECT count(*) FROM sessions WHERE id LIKE 'owui-archive-%'").fetchone()[0] == 0
+    assert read_one_store(store,
+                    "SELECT count(*) FROM sessions WHERE id LIKE 'owui-archive-%'")[0] == 0
 
 
 @pytest.mark.asyncio
@@ -244,11 +253,11 @@ async def test_wrong_profile_signature_refuses(harness):
 @pytest.mark.parametrize('field,value', [('profile_name', 'research'), ('user_id', 'foreign'),
                                         ('chat_id', 'different-chat')])
 async def test_corrupted_owner_never_rebinds(harness, field, value):
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
     sid = calls[0]['session_id']
-    db._execute_write(lambda conn: conn.execute(f'UPDATE sessions SET {field}=? WHERE id=?', (value, sid)))
+    write_sql_store(store, f'UPDATE sessions SET {field}=? WHERE id=?', (value, sid))
     assert (await post(signed(first + [{'role': 'assistant', 'content': 'READY'},
                                     {'role': 'user', 'content': 'Next'}]))).status == 409
     assert len(calls) == 1
@@ -256,63 +265,62 @@ async def test_corrupted_owner_never_rebinds(harness, field, value):
 
 @pytest.mark.asyncio
 async def test_rotated_busy_owned_turn_refuses_without_dispatch(harness):
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
     parent = calls[0]['session_id']
     child = 'busy-rotated-child'
-    db.publish_compression_child(
-        parent_session_id=parent, child_session_id=child, source='api_server',
+    publish_child(store, parent, child, source='api_server',
         messages=[{'role': 'assistant', 'content': 'Owned rotated summary'}],
         profile_name=PROFILE, require_compression_lease=False)
     holder = 'rotated-busy-holder'
-    assert db.acquire_session_turn_lease(child, holder, wait_seconds=0)
+    assert acquire_lease(store, child, holder)
     try:
         assert (await post(signed(first + [{'role': 'assistant', 'content': 'READY'},
                                          {'role': 'user', 'content': 'Next'}]))).status == 409
         assert len(calls) == 1
     finally:
-        db.release_session_turn_lease(child, holder)
+        release_lease(store, child, holder)
 
 
 @pytest.mark.asyncio
 async def test_busy_owned_turn_refuses_without_dispatch(harness):
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
     sid = calls[0]['session_id']
-    assert db.acquire_session_turn_lease(sid, 'offline-test-holder', wait_seconds=0)
+    assert acquire_lease(store, sid, 'offline-test-holder')
     try:
         assert (await post(signed(first + [{'role': 'assistant', 'content': 'READY'},
                                         {'role': 'user', 'content': 'Next'}]))).status == 409
         assert len(calls) == 1
     finally:
-        db.release_session_turn_lease(sid, 'offline-test-holder')
+        release_lease(store, sid, 'offline-test-holder')
 
 
 @pytest.mark.asyncio
 async def test_client_history_cannot_regrow_native_compaction(harness):
     from agent.compression_archive import request_archive_mint, CARRIER_KEY
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original KESTREL request'}]
     assert (await post(signed(first))).status == 200
     sid = calls[0]['session_id']
     summary = {'role': 'assistant', 'content': 'Owned compacted summary.', '_compressed_summary': True}
     request_archive_mint([summary])
-    db.archive_and_compact(sid, [summary], watermark=db.get_active_message_watermark(sid))
-    native = db.get_messages_as_conversation(sid)
+    compact(store, sid, [summary], watermark=watermark(store, sid))
+    native = conversation(store, sid)
     assert len(native) == 1 and CARRIER_KEY in native[0]['display_metadata']
     assert (await post(signed(first + [{'role': 'assistant', 'content': 'Stale raw browser answer'},
                                     {'role': 'user', 'content': 'Next'}]))).status == 200
-    assert calls[-1]['conversation_history'] == native
+    assert _shape(calls[-1]['conversation_history']) == _shape(native)
 
 
 @pytest.mark.asyncio
 async def test_real_stream_spawn_gets_same_owned_native_history(harness, monkeypatch):
-    db, adapter, calls, post = harness
+    store, adapter, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
-    native = db.get_messages_as_conversation(calls[0]['session_id'])
+    native = conversation(store, calls[0]['session_id'])
     seen = []
 
     async def writer(request, completion_id, model, created, queue, task, agent_ref, **kwargs):
@@ -325,37 +333,36 @@ async def test_real_stream_spawn_gets_same_owned_native_history(harness, monkeyp
                                         {'role': 'user', 'content': 'Next'}], stream=True))
     assert response.status == 200
     assert seen == [calls[0]['session_id']]
-    assert calls[1]['conversation_history'] == native
+    assert _shape(calls[1]['conversation_history']) == _shape(native)
 
 
 @pytest.mark.asyncio
 async def test_published_rotation_keeps_owned_native_tip(harness):
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
     parent = calls[0]['session_id']
     child = 'offline-compression-child'
-    db.publish_compression_child(
-        parent_session_id=parent, child_session_id=child, source='api_server',
+    publish_child(store, parent, child, source='api_server',
         messages=[{'role': 'assistant', 'content': 'Owned rotated summary'}],
         profile_name=PROFILE, require_compression_lease=False)
-    native = db.get_messages_as_conversation(child)
+    native = conversation(store, child)
     assert (await post(signed(first + [{'role': 'assistant', 'content': 'READY'},
                                     {'role': 'user', 'content': 'Next'}]))).status == 200
     assert calls[-1]['session_id'] == child
-    assert calls[-1]['conversation_history'] == native
+    assert _shape(calls[-1]['conversation_history']) == _shape(native)
 
 
 @pytest.mark.asyncio
 async def test_rotation_resolution_fault_refuses_before_dispatch(harness, monkeypatch):
-    db, _, calls, post = harness
+    store, _, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
 
     def unavailable(_session_id):
         raise RuntimeError('offline lineage lookup unavailable')
 
-    monkeypatch.setattr(db, 'get_compression_tip', unavailable)
+    monkeypatch.setattr(store.lineage, 'tip', unavailable)
     response = await post(signed(first + [{'role': 'assistant', 'content': 'READY'},
                                         {'role': 'user', 'content': 'Next'}]))
     assert response.status == 503
@@ -367,7 +374,7 @@ async def test_completed_writer_between_history_read_and_real_admission_is_not_l
     import threading
     from agent.turn_facade_lease import admit_durable_turn_lease
 
-    db, adapter, _calls, post = harness
+    store, adapter, _calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
     observed = []
@@ -376,14 +383,14 @@ async def test_completed_writer_between_history_read_and_real_admission_is_not_l
         sid = kwargs['session_id']
         # A real competing writer completes after route history loading but
         # before this consumer acquires the ordinary durable turn lease.
-        assert db.acquire_session_turn_lease(sid, 'completed-writer', wait_seconds=0)
+        assert acquire_lease(store, sid, 'completed-writer')
         try:
-            db.append_message(sid, 'user', 'Completed intervening user')
-            db.append_message(sid, 'assistant', 'Completed intervening answer')
+            append(store, sid, 'user', 'Completed intervening user')
+            append(store, sid, 'assistant', 'Completed intervening answer')
         finally:
-            db.release_session_turn_lease(sid, 'completed-writer')
+            release_lease(store, sid, 'completed-writer')
         agent = SimpleNamespace(
-            _session_db=db, _persist_disabled=False, session_id=sid,
+            _session_db=store, persistence=store, _persist_disabled=False, session_id=sid,
             _owned_chat_history=kwargs.get('owned_chat_history'),
             _liveness_activity_lock=lambda: threading.RLock())
         admission = admit_durable_turn_lease(
@@ -410,26 +417,24 @@ async def test_post_read_fault_refuses_and_releases_real_lease(harness, monkeypa
     import threading
     from agent.turn_facade_lease import admit_durable_turn_lease
 
-    db, adapter, calls, post = harness
+    store, adapter, calls, post = harness
     first = [{'role': 'user', 'content': 'Original'}]
     assert (await post(signed(first))).status == 200
     sid = calls[0]['session_id']
 
     async def refusing_run(**kwargs):
         if fault == 'owner':
-            db._execute_write(lambda conn: conn.execute(
-                'UPDATE sessions SET user_id=? WHERE id=?', ('foreign', sid)))
+            write_sql_store(store, 'UPDATE sessions SET user_id=? WHERE id=?', ('foreign', sid))
         elif fault == 'rotation':
-            db.publish_compression_child(
-                parent_session_id=sid, child_session_id='new-live-tip', source='api_server',
+            publish_child(store, sid, 'new-live-tip', source='api_server',
                 messages=[{'role': 'assistant', 'content': 'New summary'}],
                 profile_name=PROFILE, require_compression_lease=False)
         else:
             def unavailable(_sid):
                 raise RuntimeError('post-read lineage unavailable')
-            monkeypatch.setattr(db, 'get_compression_tip', unavailable)
+            monkeypatch.setattr(store.lineage, 'tip', unavailable)
         agent = SimpleNamespace(
-            _session_db=db, _persist_disabled=False, session_id=sid,
+            _session_db=store, persistence=store, _persist_disabled=False, session_id=sid,
             _owned_chat_history=kwargs['owned_chat_history'],
             _liveness_activity_lock=lambda: threading.RLock())
         with pytest.raises((ValueError, RuntimeError)):
@@ -438,8 +443,8 @@ async def test_post_read_fault_refuses_and_releases_real_lease(harness, monkeypa
                 task_context={'platform': 'api_server'},
                 conversation_history=kwargs['conversation_history'])
         assert agent._active_session_turn_lease_holder is None
-        assert db.acquire_session_turn_lease(sid, 'cleanup-probe', wait_seconds=0)
-        db.release_session_turn_lease(sid, 'cleanup-probe')
+        assert acquire_lease(store, sid, 'cleanup-probe')
+        release_lease(store, sid, 'cleanup-probe')
         return {'final_response': 'refused', 'completed': False, 'session_id': sid}, {}
 
     monkeypatch.setattr(adapter, '_run_agent', refusing_run)
@@ -454,7 +459,7 @@ async def test_ordinary_agent_restores_exact_priced_anchor_after_admitted_reload
     from run_agent import AIAgent
     from agent import conversation_loop
 
-    db, adapter, calls, post = harness
+    store, adapter, calls, post = harness
     first = [{'role': 'user', 'content': 'Original raw UI input'}]
     assert (await post(signed(first))).status == 200
     sid = calls[0]['session_id']
@@ -463,7 +468,7 @@ async def test_ordinary_agent_restores_exact_priced_anchor_after_admitted_reload
     (home / 'config.yaml').write_text(json.dumps({'auxiliary': {'compression': {'archive_receipts': True}}}))
     monkeypatch.setenv('HERMES_HOME', str(home))
     observed = []
-    expected = capture_usage_anchor(5000, 10, db.get_messages_as_conversation(sid)[:1])
+    expected = capture_usage_anchor(5000, 10, conversation(store, sid)[:1])
 
     class HydrationReached(RuntimeError):
         pass
@@ -483,7 +488,7 @@ async def test_ordinary_agent_restores_exact_priced_anchor_after_admitted_reload
         agent = AIAgent(
             api_key='fixture', provider='custom', model='fixture', base_url='http://127.0.0.1:9/v1',
             quiet_mode=True, skip_context_files=True, skip_memory=True, max_iterations=1,
-            enabled_toolsets=['session_search'], session_id=sid, session_db=db)
+            enabled_toolsets=['session_search'], session_id=sid, persistence=store)
 
         monkeypatch.setattr(adapter, '_create_agent', lambda **_kwargs: agent)
         monkeypatch.setattr(adapter, '_profile_scope', lambda _profile: nullcontext())

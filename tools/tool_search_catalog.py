@@ -11,7 +11,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-import snowballstemmer
+try:  # Optional: declared with the 3.14 dependency set (see pyproject.toml). A legacy
+    # interpreter (the updater keeps <3.14 installs alive) has no wheel installed, and a
+    # missing stemmer must never take down tool dispatch, so the catalog degrades instead.
+    import snowballstemmer
+except ImportError:  # pragma: no cover - the fallback path itself is covered by test_tool_search_stemming_fallback
+    snowballstemmer = None
 
 # Reserved bridge names: a user/plugin/MCP tool may not take them (registry override
 # protection rejects such registrations).
@@ -39,18 +44,51 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _thread_local = threading.local()
 
 
+def stemmer_available() -> bool:
+    """True when the Snowball stemmer is installed for this interpreter."""
+    return snowballstemmer is not None
+
+
+def _fallback_stem(token: str) -> str:
+    """Coarse English suffix strip for interpreters without Snowball.
+
+    Deliberately small — plurals, ``-ing``/``-ed`` and a final ``e`` — so the documented
+    morphology (``issues``/``issue``, ``creating``/``create``) still matches instead of
+    reimplementing Snowball. The index and query paths share it, so a fallback deployment stays
+    self-consistent even where a stem differs from Snowball's.
+    """
+    if len(token) <= 3:
+        return token
+    if token.endswith("ies") and len(token) > 4:
+        token = token[:-3] + "y"
+    elif token.endswith("ing") and len(token) >= 6:
+        token = token[:-3]
+    elif token.endswith("ed") and len(token) >= 5:
+        token = token[:-2]
+    elif token.endswith(("ss", "us", "is")):
+        return token
+    elif token.endswith("s"):
+        token = token[:-1]
+    if len(token) >= 5 and token.endswith("e"):
+        token = token[:-1]
+    return token
+
+
 @functools.lru_cache(maxsize=16384)
 def _stem(token: str) -> str:
     """Stem one token, memoized across stateless catalog rebuilds. Snowball stemmers carry
     mutable parsing state and bridge dispatch runs on parallel tool-call threads, so the
-    stemmer is one-per-thread, created lazily."""
+    stemmer is one-per-thread, created lazily. Without the package the index and query paths
+    share ``_fallback_stem`` instead of failing."""
+    if snowballstemmer is None:
+        return _fallback_stem(token)
     if getattr(_thread_local, "stemmer", None) is None:
         _thread_local.stemmer = snowballstemmer.stemmer("english")
     return _thread_local.stemmer.stemWord(token)
 
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercase alphanumeric tokens, Snowball-stemmed (English); shared by the index and
+    """Lowercase alphanumeric tokens, stemmed (English); shared by the index and
     query paths so "issues" matches ``create_issue``."""
     return [_stem(token.lower()) for token in _TOKEN_RE.findall(text)] if text else []
 

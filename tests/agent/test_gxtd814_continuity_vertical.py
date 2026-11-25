@@ -12,7 +12,9 @@ import time
 
 import pytest
 
-from hermes_state import SessionDB
+import agent.compression_archive as _archive
+from tests._fixtures.store_support import (
+    append, append_rows, compact, conversation, create_session, open_store, raw, watermark, write_sql)
 
 
 OMITTED = 'COBALT-CABINET-OMITTED'
@@ -26,7 +28,7 @@ def _write_config(tmp_path, **compression):
 
 
 def _session(db, session_id='vertical', profile='research'):
-    db.create_session(session_id, 'cli', profile_name=profile)
+    create_session(db, session_id, 'cli', profile_name=profile)
 
 
 def _source_rows(marker=OMITTED):
@@ -47,20 +49,20 @@ def test_typed_carrier_with_drifted_source_refuses_publication_atomically(tmp_pa
     minting refuses the whole compaction and preserves the original rows."""
     from agent.compression_archive import capture, install_carrier
 
-    path = tmp_path / 'drift.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         reference = capture(db, 'vertical', 'research')
         carrier = _summary_row()
         install_carrier(carrier, reference)
         # Trusted drift: rewrite the archived source before publication.
-        db._write_sql("UPDATE messages SET content='rewritten' "
+        write_sql(tmp_path, "UPDATE messages SET content='rewritten' "
                       "WHERE session_id='vertical' AND id=1")
         with pytest.raises(ValueError, match='changed or missing'):
-            db.archive_and_compact('vertical', [copy.deepcopy(carrier)])
-    with SessionDB(db_path=path) as reopened:
-        with reopened._read_ctx() as conn:
+            compact(db, 'vertical', [copy.deepcopy(carrier)])
+    with open_store(path) as reopened:
+        with raw(tmp_path) as conn:
             original = conn.execute(
                 "SELECT content FROM messages WHERE session_id='vertical' AND id=1").fetchone()
             active = conn.execute(
@@ -79,16 +81,16 @@ def test_publication_mints_receipt_from_real_archived_source(tmp_path):
     from agent.compression_archive import (
         CARRIER_KEY, PREFIX, request_archive_mint, resolve)
 
-    path = tmp_path / 'mint.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         carrier = _summary_row()
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
-        db.archive_and_compact('vertical', [carrier], watermark=watermark)
-    with SessionDB(db_path=path) as reopened:
-        with reopened._read_ctx() as conn:
+        mark = watermark(db, 'vertical')
+        compact(db, 'vertical', [carrier], watermark=mark)
+    with open_store(path) as reopened:
+        with raw(tmp_path) as conn:
             row = conn.execute(
                 "SELECT display_metadata FROM messages WHERE session_id='vertical' "
                 "AND COALESCE(_compressed_summary,0)=1 ORDER BY id DESC LIMIT 1").fetchone()
@@ -113,11 +115,11 @@ def _publish_with_receipt(db, *, session_id='vertical', profile='research'):
     the config-gated product seam produces)."""
     from agent.compression_archive import request_archive_mint
     _session(db, session_id, profile)
-    db.append_messages_batch(session_id, copy.deepcopy(_source_rows()))
+    append_rows(db, session_id, copy.deepcopy(_source_rows()))
     carrier = _summary_row()
     request_archive_mint([carrier])
-    watermark = db.get_active_message_watermark(session_id)
-    db.archive_and_compact(session_id, [carrier], watermark=watermark)
+    mark = watermark(db, session_id)
+    compact(db, session_id, [carrier], watermark=mark)
 
 
 def test_full_vertical_real_publication_reopen_ordinary_agent_bound_recall(tmp_path, monkeypatch):
@@ -127,17 +129,17 @@ def test_full_vertical_real_publication_reopen_ordinary_agent_bound_recall(tmp_p
     executor recalls the exact omitted source ONLY through the bound path."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'vertical.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _publish_with_receipt(db)
     # Ordinary construction: real AIAgent on a custom route (no dispatch is
     # possible or attempted), bound to the reopened DB and the owned session.
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=reopened)
+                        session_id='vertical', persistence=reopened)
         binding = getattr(agent, '_compression_archive_recall', None)
         assert binding is not None, 'ordinary construction with carrier must bind from the typed carrier'
         adapter, _reference = binding
@@ -156,15 +158,15 @@ def test_config_disabled_construction_stays_unbound(tmp_path, monkeypatch):
     broad behavior."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path)  # no archive_receipts key
-    path = tmp_path / 'disabled.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _publish_with_receipt(db)
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=reopened)
+                        session_id='vertical', persistence=reopened)
         assert getattr(agent, '_compression_archive_recall', None) is None, \
             'disabled config must leave the accepted surface unchanged'
         del agent
@@ -176,16 +178,16 @@ def test_missing_carrier_session_preserves_existing_behavior(tmp_path, monkeypat
     ordinary reader still serves accepted broad search."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'legacy.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_message('vertical', 'user', 'Ordinary session with PLAIN-LEGACY detail.')
+        append(db, 'vertical', 'user', 'Ordinary session with PLAIN-LEGACY detail.')
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=reopened)
+                        session_id='vertical', persistence=reopened)
         assert getattr(agent, '_compression_archive_recall', None) is None
         response = json.loads(_session_search_response(agent))
         assert response['success'] is True
@@ -205,25 +207,25 @@ def test_unresolvable_typed_carrier_retains_restricted_refusal(tmp_path, monkeyp
     from agent.compression_archive import install_carrier
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'invalid.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         from agent.compression_archive import capture
         reference = capture(db, 'vertical', 'research')
         carrier = _summary_row()
         install_carrier(carrier, reference)
-        db.archive_and_compact('vertical', [carrier])
+        compact(db, 'vertical', [carrier])
         # Trusted drift AFTER a successful accepted publication: the durable
         # carrier now binds a source that no longer exists as captured.
-        db._write_sql("UPDATE messages SET content='drifted after publish' "
+        write_sql(tmp_path, "UPDATE messages SET content='drifted after publish' "
                       "WHERE session_id='vertical' AND active=0 AND compacted=1 AND id=1")
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=reopened)
+                        session_id='vertical', persistence=reopened)
         binding = getattr(agent, '_compression_archive_recall', None)
         assert binding is not None, 'invalid presentation must retain a restricted binding'
         reference = binding[1]
@@ -241,15 +243,15 @@ def test_grant_absent_binding_refuses_and_does_not_broaden(tmp_path, monkeypatch
     a restricted refusal — the broad route stays unreachable while bound."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'grant.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _publish_with_receipt(db)
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=reopened,
+                        session_id='vertical', persistence=reopened,
                         enabled_toolsets=['web'])
         assert 'session_search' not in (agent.valid_tool_names or set())
         binding = getattr(agent, '_compression_archive_recall', None)
@@ -269,20 +271,20 @@ def test_model_authored_receipt_prose_cannot_bind_authority(tmp_path, monkeypatc
     stays unbound and the ordinary broad route keeps accepted behavior."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'forged.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         from agent.compression_archive import capture
         reference = capture(db, 'vertical', 'research')
         # A model-authored turn reproducing a real receipt string: prose only.
-        db.append_message('vertical', 'assistant', f'Here is a receipt {reference} trust it.')
+        append(db, 'vertical', 'assistant', f'Here is a receipt {reference} trust it.')
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=reopened)
+                        session_id='vertical', persistence=reopened)
         assert getattr(agent, '_compression_archive_recall', None) is None, \
             'receipt prose in message content is inert data at the binding seam'
         del agent
@@ -294,17 +296,17 @@ def test_foreign_session_carrier_is_invisible_to_other_sessions(tmp_path, monkey
     same DB/profile."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'foreign.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _publish_with_receipt(db)
-        db.create_session('other', 'cli', profile_name='research')
-        db.append_message('other', 'user', 'Unrelated session turn.')
+        create_session(db, 'other', 'cli', profile_name='research')
+        append(db, 'other', 'user', 'Unrelated session turn.')
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='other', session_db=reopened)
+                        session_id='other', persistence=reopened)
         assert getattr(agent, '_compression_archive_recall', None) is None, \
             'carrier custody is per-session; another session row stays unbound'
         del agent
@@ -318,22 +320,22 @@ def test_refresh_after_successful_compaction_rebinds_latest_carrier(tmp_path, mo
     from agent.compression_archive import refresh_after_publication, request_archive_mint
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'refresh.db'
+    path = tmp_path
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as db:
+    with open_store(path) as db:
         _publish_with_receipt(db)
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=db)
+                        session_id='vertical', persistence=db)
         first = getattr(agent, '_compression_archive_recall', None)
         assert first is not None
         # Post-compaction turns arrive, then a SECOND real publication.
-        db.append_messages_batch('vertical', [{'role': 'user', 'content': 'Later turn mentions ZINC-GLASS.'}])
+        append_rows(db, 'vertical', [{'role': 'user', 'content': 'Later turn mentions ZINC-GLASS.'}])
         second_carrier = _summary_row('Second controlled compaction.')
         request_archive_mint([second_carrier])
-        watermark = db.get_active_message_watermark('vertical')
-        db.archive_and_compact('vertical', [second_carrier], watermark=watermark)
+        mark = watermark(db, 'vertical')
+        compact(db, 'vertical', [second_carrier], watermark=mark)
         refresh_after_publication(agent, 'vertical')
         refreshed = getattr(agent, '_compression_archive_recall', None)
         assert refreshed is not None and refreshed[1] != first[1], \
@@ -351,11 +353,11 @@ def test_foreign_owner_carrier_refuses_via_owner_mismatch(tmp_path, monkeypatch)
     from agent.compression_archive import capture, install_carrier
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'xowner.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db, 'vertical', 'research')
-        db.create_session('other', 'cli', profile_name='personal')
-        db.append_messages_batch('other', copy.deepcopy(_source_rows()))
+        create_session(db, 'other', 'cli', profile_name='personal')
+        append_rows(db, 'other', copy.deepcopy(_source_rows()))
         foreign = capture(db, 'other', 'personal')
         carrier = _summary_row()
         install_carrier(carrier, foreign)
@@ -363,9 +365,9 @@ def test_foreign_owner_carrier_refuses_via_owner_mismatch(tmp_path, monkeypatch)
         # resolve, coverage-invalid when the presenting session has no rows
         # under the foreign bound. Either way, publication refuses.
         with pytest.raises(ValueError, match='owner mismatch|changed or missing|coverage invalid'):
-            db.archive_and_compact('vertical', [copy.deepcopy(carrier)])
-    with SessionDB(db_path=path) as reopened:
-        with reopened._read_ctx() as conn:
+            compact(db, 'vertical', [copy.deepcopy(carrier)])
+    with open_store(path) as reopened:
+        with raw(tmp_path) as conn:
             summaries = conn.execute(
                 "SELECT COUNT(*) FROM messages WHERE session_id='vertical'").fetchone()[0]
         assert summaries == 0, 'foreign-owner publication must leave no rows'
@@ -391,16 +393,16 @@ def test_mint_budget_cap_publishes_without_receipt_with_durable_unavailable_stat
     from agent.compression_archive import request_archive_mint
 
     _degrade_to_budget_cap(monkeypatch)
-    path = tmp_path / 'bd1.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         carrier = _summary_row()
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
-        published = db.archive_and_compact('vertical', [carrier], watermark=watermark)
+        mark = watermark(db, 'vertical')
+        published = compact(db, 'vertical', [carrier], watermark=mark)
         assert published == 1, 'compaction itself must still publish at the cap'
-        with db._read_ctx() as conn:
+        with raw(tmp_path) as conn:
             original = conn.execute(
                 "SELECT content,active,compacted FROM messages WHERE session_id='vertical' AND id=1"
             ).fetchone()
@@ -424,22 +426,22 @@ def test_identity_conflict_still_refuses_publication_atomically_at_cap_degradati
     errors."""
     from agent.compression_archive import request_archive_mint
 
-    path = tmp_path / 'bd1-identity.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         # Trusted corruption: re-key one archived row to another's uid with
         # different content -> clone identity conflict at snapshot time.
-        db._write_sql("UPDATE messages SET message_uid = ("
+        write_sql(tmp_path, "UPDATE messages SET message_uid = ("
                       "SELECT message_uid FROM messages WHERE session_id='vertical' AND id=1"
                       ") WHERE session_id='vertical' AND id=2")
         carrier = _summary_row()
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
+        mark = watermark(db, 'vertical')
         with pytest.raises(ValueError, match='clone identity conflict'):
-            db.archive_and_compact('vertical', [carrier], watermark=watermark)
-    with SessionDB(db_path=path) as reopened:
-        with reopened._read_ctx() as conn:
+            compact(db, 'vertical', [carrier], watermark=mark)
+    with open_store(path) as reopened:
+        with raw(tmp_path) as conn:
             active = conn.execute(
                 "SELECT COUNT(*) FROM messages WHERE session_id='vertical' AND active=1").fetchone()[0]
             summaries = conn.execute(
@@ -461,19 +463,19 @@ def test_unavailable_status_binds_narrow_refusal_never_broad(tmp_path, monkeypat
     _degrade_to_budget_cap(monkeypatch)
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'bd1-bind.db'
+    path = tmp_path
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as db:
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         carrier = _summary_row()
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
-        db.archive_and_compact('vertical', [carrier], watermark=watermark)
+        mark = watermark(db, 'vertical')
+        compact(db, 'vertical', [carrier], watermark=mark)
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=db)
+                        session_id='vertical', persistence=db)
         binding = getattr(agent, '_compression_archive_recall', None)
         assert binding is not None, 'durable unavailable status must bind a restricted refusal'
         assert binding[0] is None
@@ -495,28 +497,28 @@ def test_foreign_unavailable_status_shape_is_not_trusted(tmp_path, monkeypatch):
     import agent.compression_archive as archive
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'bd1-foreign.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         from agent.compression_archive import request_archive_mint
         carrier = _summary_row()
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
-        db.archive_and_compact('vertical', [carrier], watermark=watermark)
+        mark = watermark(db, 'vertical')
+        compact(db, 'vertical', [carrier], watermark=mark)
         # A publication, then a foreign lookalike status stamped directly
         # onto the summary row's typed metadata (unknown reason code).
-        db._write_sql(
+        write_sql(tmp_path,
             "UPDATE messages SET display_metadata = ? WHERE session_id='vertical' "
             "AND COALESCE(_compressed_summary,0)=1",
             (json.dumps({archive.AVAILABILITY_KEY: {'state': 'unavailable',
                                                     'reason_code': 'whatever-i-said-so'}}),))
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=reopened)
+                        session_id='vertical', persistence=reopened)
         binding = getattr(agent, '_compression_archive_recall', None)
         assert binding is not None, \
             'a present malformed typed key is a presentation fault: restricted, never broad'
@@ -539,24 +541,24 @@ def test_transient_store_fault_fail_closed_then_recovered_broad_on_recall(tmp_pa
     route is restored — carrier-less sessions are not permanently refused."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'probe-fail.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_message('vertical', 'user', 'Surviving ordinary turn PROBE-SAFE.')
+        append(db, 'vertical', 'user', 'Surviving ordinary turn PROBE-SAFE.')
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as reopened:
-        original = reopened._read_ctx
+    with open_store(path) as reopened:
+        original_read_latest_row = _archive._read_latest_row
 
-        def broken_read_ctx():
+        def broken_read_latest_row(*args, **kwargs):
             raise RuntimeError('simulated store outage')
-        reopened._read_ctx = broken_read_ctx
+        _archive._read_latest_row = broken_read_latest_row
         try:
             agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                             provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                             skip_context_files=True, skip_memory=True, max_iterations=1,
-                            session_id='vertical', session_db=reopened)
+                            session_id='vertical', persistence=reopened)
         finally:
-            del reopened._read_ctx
+            _archive._read_latest_row = original_read_latest_row
         binding = getattr(agent, '_compression_archive_recall', None)
         assert binding is not None, 'an unavailable owner store must retain a restricted binding'
         assert len(binding) == 3 and binding[2] == 'store-unavailable', \
@@ -578,21 +580,21 @@ def test_transient_recovery_probe_never_clears_on_failed_probe(tmp_path, monkeyp
     probe remains bounded (attempts increment up to the cap, then stop)."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'probe-stay.db'
+    path = tmp_path
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as db:
+    with open_store(path) as db:
         _session(db)
-        db.append_message('vertical', 'user', 'Ordinary turn PROBE-STAY.')
-        original = db._read_ctx
+        append(db, 'vertical', 'user', 'Ordinary turn PROBE-STAY.')
+        original_read_latest_row = _archive._read_latest_row
 
-        def broken_read_ctx():
+        def broken_read_latest_row(*args, **kwargs):
             raise RuntimeError('simulated store outage')
-        db._read_ctx = broken_read_ctx
+        _archive._read_latest_row = broken_read_latest_row
         try:
             agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                             provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                             skip_context_files=True, skip_memory=True, max_iterations=1,
-                            session_id='vertical', session_db=db)
+                            session_id='vertical', persistence=db)
             binding = getattr(agent, '_compression_archive_recall', None)
             assert binding is not None and binding[2] == 'store-unavailable'
             from agent.inline_tool_executors import _session_search
@@ -606,7 +608,7 @@ def test_transient_recovery_probe_never_clears_on_failed_probe(tmp_path, monkeyp
             # Failed probes never clear, regardless of count.
             assert getattr(agent, '_compression_archive_recall', None) is binding
         finally:
-            del db._read_ctx
+            _archive._read_latest_row = original_read_latest_row
         # Store recovered: force the bounded window open deterministically;
         # the NEXT probe may resolve broad — but only via a POSITIVE
         # observation.
@@ -624,24 +626,24 @@ def test_transient_recovery_rebinds_recovered_carrier(tmp_path, monkeypatch):
     from agent.compression_archive import request_archive_mint
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'probe-carrier.db'
+    path = tmp_path
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as db:
+    with open_store(path) as db:
         _publish_with_receipt(db)  # real publication, valid carrier
-        original = db._read_ctx
+        original_read_latest_row = _archive._read_latest_row
 
-        def broken_read_ctx():
+        def broken_read_latest_row(*args, **kwargs):
             raise RuntimeError('simulated store outage')
-        db._read_ctx = broken_read_ctx
+        _archive._read_latest_row = broken_read_latest_row
         try:
             agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                             provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                             skip_context_files=True, skip_memory=True, max_iterations=1,
-                            session_id='vertical', session_db=db)
+                            session_id='vertical', persistence=db)
             binding = getattr(agent, '_compression_archive_recall', None)
             assert binding is not None and binding[2] == 'store-unavailable'
         finally:
-            del db._read_ctx
+            _archive._read_latest_row = original_read_latest_row
         # Store recovered mid-lifetime; force the probe window open
         # deterministically (bounded recovery is time-backed off).
         agent._compression_archive_recovery = {'attempts': 0, 'last': time.monotonic() - 60}
@@ -663,24 +665,24 @@ def test_transient_recovery_runs_on_successful_refresh(tmp_path, monkeypatch):
     import time
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'probe-refresh.db'
+    path = tmp_path
     from agent.compression_archive import refresh_after_publication
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as db:
+    with open_store(path) as db:
         _session(db)
-        db.append_message('vertical', 'user', 'Legacy turn, no carrier ever.')
-        original = db._read_ctx
+        append(db, 'vertical', 'user', 'Legacy turn, no carrier ever.')
+        original_read_latest_row = _archive._read_latest_row
 
-        def broken_read_ctx():
+        def broken_read_latest_row(*args, **kwargs):
             raise RuntimeError('simulated store outage')
-        db._read_ctx = broken_read_ctx
+        _archive._read_latest_row = broken_read_latest_row
         try:
             agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                             provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                             skip_context_files=True, skip_memory=True, max_iterations=1,
-                            session_id='vertical', session_db=db)
+                            session_id='vertical', persistence=db)
         finally:
-            del db._read_ctx
+            _archive._read_latest_row = original_read_latest_row
         binding = getattr(agent, '_compression_archive_recall', None)
         assert binding is not None and binding[2] == 'store-unavailable'
         agent._compression_archive_recovery = {'attempts': 0, 'last': time.monotonic() - 60}
@@ -700,19 +702,19 @@ def test_unavailable_status_is_final_for_probes(tmp_path, monkeypatch):
     _degrade_to_budget_cap(monkeypatch)
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     _write_config(tmp_path, archive_receipts=True)
-    path = tmp_path / 'final-unavailable.db'
+    path = tmp_path
     from run_agent import AIAgent
-    with SessionDB(db_path=path) as db:
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         carrier = _summary_row()
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
-        db.archive_and_compact('vertical', [carrier], watermark=watermark)
+        mark = watermark(db, 'vertical')
+        compact(db, 'vertical', [carrier], watermark=mark)
         agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                         provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                         skip_context_files=True, skip_memory=True, max_iterations=1,
-                        session_id='vertical', session_db=db)
+                        session_id='vertical', persistence=db)
         binding = getattr(agent, '_compression_archive_recall', None)
         assert binding is not None and len(binding) == 2, 'final binding, untagged'
         agent._compression_archive_recovery = {'attempts': 0, 'last': time.monotonic() - 60}
@@ -742,21 +744,20 @@ def test_proved_coverage_named_rows_publication_mints_resolvable_receipt(tmp_pat
     insert paths; the receipt resolves after reopen with real coverage."""
     from agent.compression_archive import CARRIER_KEY, PREFIX, request_archive_mint, resolve
 
-    path = tmp_path / 'named.db'
-    with SessionDB(db_path=path) as db:
+    path = tmp_path
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
-        with db._read_ctx() as conn:
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
+        with raw(tmp_path) as conn:
             covered_ids = [r[0] for r in conn.execute(
                 "SELECT id FROM messages WHERE session_id='vertical' AND active=1 ORDER BY id")]
         carrier = _summary_row()
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
-        published = db.archive_and_compact(
-            'vertical', [carrier], watermark=watermark, covered_ids=covered_ids)
+        mark = watermark(db, 'vertical')
+        published = compact(db, 'vertical', [carrier], watermark=mark, covered_ids=covered_ids)
         assert published == 1
-    with SessionDB(db_path=path) as reopened:
-        with reopened._read_ctx() as conn:
+    with open_store(path) as reopened:
+        with raw(tmp_path) as conn:
             row = conn.execute(
                 "SELECT display_metadata FROM messages WHERE session_id='vertical' "
                 "AND COALESCE(_compressed_summary,0)=1 ORDER BY id DESC LIMIT 1").fetchone()
@@ -779,11 +780,11 @@ def test_failed_publication_rolls_back_persisted_metadata_but_keeps_retry_marker
     Retry with the same dicts re-mints and publishes normally."""
     from agent.compression_archive import CARRIER_KEY, PREFIX, install_carrier, request_archive_mint
 
-    path = tmp_path / 'rollback.db'
+    path = tmp_path
     stale_reference = None
-    with SessionDB(db_path=path) as db:
+    with open_store(path) as db:
         _session(db)
-        db.append_messages_batch('vertical', copy.deepcopy(_source_rows()))
+        append_rows(db, 'vertical', copy.deepcopy(_source_rows()))
         stale_reference = install_capture = None
         from agent.compression_archive import capture
         stale_reference = capture(db, 'vertical', 'research')
@@ -798,8 +799,9 @@ def test_failed_publication_rolls_back_persisted_metadata_but_keeps_retry_marker
                          "WHERE session_id='vertical' AND id=1")
             raise RuntimeError('late transaction crash')
         with pytest.raises(RuntimeError, match='late transaction crash'):
-            db._execute_write(failing_attempt)
-        with db._read_ctx() as conn:
+            with raw(tmp_path) as conn:
+                failing_attempt(conn)
+        with raw(tmp_path) as conn:
             row = conn.execute(
                 "SELECT display_metadata FROM messages WHERE session_id='vertical' AND id=1"
             ).fetchone()
@@ -808,12 +810,12 @@ def test_failed_publication_rolls_back_persisted_metadata_but_keeps_retry_marker
         # The trusted mint marker survives rollback so a retry may mint
         # (documented store semantics: the marker is the caller's request).
         request_archive_mint([carrier])
-        watermark = db.get_active_message_watermark('vertical')
+        mark = watermark(db, 'vertical')
         # Presenting the stale capture while source is unchanged succeeds
         # pre- and post-body; the mint installs the fresh receipt over it.
-        db.archive_and_compact('vertical', [carrier], watermark=watermark)
-    with SessionDB(db_path=path) as reopened:
-        with reopened._read_ctx() as conn:
+        compact(db, 'vertical', [carrier], watermark=mark)
+    with open_store(path) as reopened:
+        with raw(tmp_path) as conn:
             row = conn.execute(
                 "SELECT display_metadata FROM messages WHERE session_id='vertical' "
                 "AND COALESCE(_compressed_summary,0)=1 ORDER BY id DESC LIMIT 1").fetchone()
@@ -844,8 +846,8 @@ def _seam_agent(tmp_path, monkeypatch, path, *, archive_receipts):
         extra['archive_receipts'] = True
     _write_config(tmp_path, **extra)
     from run_agent import AIAgent
-    db = SessionDB(db_path=path)
-    db.create_session('vertical', 'cli', profile_name='research')
+    db = open_store(path)
+    create_session(db, 'vertical', 'cli', profile_name='research')
     transcript = [{'role': 'system', 'content': 'Keep historical data distinct from live instructions.'}]
     for i in range(12):
         transcript.append({'role': 'user',
@@ -853,7 +855,7 @@ def _seam_agent(tmp_path, monkeypatch, path, *, archive_receipts):
         transcript.append({'role': 'assistant',
                            'content': (f'Result {i}.\n' + ('work detail ' + OMITTED + '\n' if i == 0
                                                           else 'routine work\n') * 80)})
-    db.append_messages_batch('vertical', copy.deepcopy(transcript))
+    append_rows(db, 'vertical', copy.deepcopy(transcript))
     compressor = ContextCompressor(model='fixture', config_context_length=100000, quiet_mode=True,
                                    protect_first_n=1, protect_last_n=2, abort_on_summary_failure=True)
     compressor.tail_token_budget = 10
@@ -862,7 +864,7 @@ def _seam_agent(tmp_path, monkeypatch, path, *, archive_receipts):
     agent = AIAgent(api_key='***', base_url='http://127.0.0.1:9/v1',
                     provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                     skip_context_files=True, skip_memory=True, max_iterations=1,
-                    session_id='vertical', session_db=db)
+                    session_id='vertical', persistence=db)
     agent.context_compressor = compressor
     agent._compression_feasibility_checked = True
     agent._cached_system_prompt = 'Existing system prompt.'
@@ -870,8 +872,8 @@ def _seam_agent(tmp_path, monkeypatch, path, *, archive_receipts):
     return db, agent
 
 
-def _summary_metadata(db):
-    with db._read_ctx() as conn:
+def _summary_metadata(tmp_path):
+    with raw(tmp_path) as conn:
         rows = conn.execute(
             "SELECT id,display_metadata FROM messages WHERE session_id='vertical' "
             "AND COALESCE(_compressed_summary,0)=1 ORDER BY id").fetchall()
@@ -886,14 +888,14 @@ def test_real_commit_compaction_seam_mints_persists_and_refreshes(tmp_path, monk
     the post-publication refresh binds the live agent to it. Non-native
     summary fixture only."""
     from agent.compression_archive import CARRIER_KEY, PREFIX, resolve
-    path = tmp_path / 'seam1.db'
+    path = tmp_path
     db, agent = _seam_agent(tmp_path, monkeypatch, path, archive_receipts=True)
     try:
-        original = db.get_messages_as_conversation('vertical')
+        original = conversation(db, 'vertical')
         result, _ = agent._compress_context(copy.deepcopy(original), 'Existing system prompt.',
                                             force=True)
         assert result != original, 'the controlled compressor must produce a compaction'
-        meta = _summary_metadata(db)
+        meta = _summary_metadata(tmp_path)
         assert meta, 'the real commit path must publish a summary row'
         reference = next((m[CARRIER_KEY] for m in meta.values() if CARRIER_KEY in m), None)
         assert reference is not None and reference.startswith(PREFIX), \
@@ -918,21 +920,21 @@ def test_real_commit_compaction_second_cycle_carries_old_presented_carrier(tmp_p
     store gate validates the re-presented carrier inside the transaction and
     the newer mint becomes the newest trusted carrier."""
     from agent.compression_archive import CARRIER_KEY, PREFIX, resolve
-    path = tmp_path / 'seam2.db'
+    path = tmp_path
     db, agent = _seam_agent(tmp_path, monkeypatch, path, archive_receipts=True)
     try:
-        first = db.get_messages_as_conversation('vertical')
+        first = conversation(db, 'vertical')
         after1, _ = agent._compress_context(copy.deepcopy(first), 'Existing system prompt.',
                                             force=True)
         assert after1 != first
-        meta1 = _summary_metadata(db)
+        meta1 = _summary_metadata(tmp_path)
         first_ref = next((m[CARRIER_KEY] for m in meta1.values() if CARRIER_KEY in m), None)
         assert first_ref and first_ref.startswith(PREFIX)
         # Reload (durable projection), add a turn, and compact AGAIN through
         # the same seam: the cycle-1 carrier rides forward on the summary
         # dict carried into the new candidate.
-        db.append_message('vertical', 'user', 'Later seam turn ZINC-GLASS.')
-        second = db.get_messages_as_conversation('vertical')
+        append(db, 'vertical', 'user', 'Later seam turn ZINC-GLASS.')
+        second = conversation(db, 'vertical')
         assert any(isinstance(m.get('display_metadata'), dict)
                    and CARRIER_KEY in m['display_metadata'] for m in second), \
             'the durable typed carrier must project back onto the reloaded summary dict'
@@ -942,7 +944,7 @@ def test_real_commit_compaction_second_cycle_carries_old_presented_carrier(tmp_p
         after2, _ = agent._compress_context(copy.deepcopy(second), 'Existing system prompt.',
                                             force=True)
         assert after2 != second
-        meta2 = _summary_metadata(db)
+        meta2 = _summary_metadata(tmp_path)
         refs = [m[CARRIER_KEY] for m in meta2.values() if CARRIER_KEY in m]
         assert len(refs) == 2, 'both cycles persist their own carriers'
         assert refs[-1] != first_ref, 'the second cycle must mint a NEWER receipt'
@@ -960,18 +962,18 @@ def test_real_commit_compaction_second_cycle_carries_old_presented_carrier(tmp_p
     # not merely the committing process's in-memory binding.
     from run_agent import AIAgent
     from agent.inline_tool_executors import _session_search
-    with SessionDB(db_path=path) as reopened:
+    with open_store(path) as reopened:
         resumed = AIAgent(api_key='fixture', base_url='http://127.0.0.1:9/v1',
                           provider='custom', model='gxtd814-vertical-model', quiet_mode=True,
                           skip_context_files=True, skip_memory=True, max_iterations=1,
-                          session_id='vertical', session_db=reopened)
+                          session_id='vertical', persistence=reopened)
         assert resumed._compression_archive_recall[1] == refs[-1]
         response = json.loads(_session_search(resumed, {'query': OMITTED}, None))
         assert response['success'] is True and OMITTED in json.dumps(response)
         # Fresh protected-tail content remains live, not an archived search
         # hit: archive recall intentionally searches compacted originals only.
         assert any('ZINC-GLASS' in str(m.get('content', ''))
-                   for m in reopened.get_messages_as_conversation('vertical'))
+                   for m in conversation(reopened, 'vertical'))
 
 
 def test_real_commit_compaction_config_disabled_stays_carrier_free(tmp_path, monkeypatch):
@@ -979,14 +981,14 @@ def test_real_commit_compaction_config_disabled_stays_carrier_free(tmp_path, mon
     publishes with ZERO typed carrier keys and leaves the agent unbound —
     the accepted publication shape, unchanged."""
     import agent.compression_archive as archive
-    path = tmp_path / 'seam-off.db'
+    path = tmp_path
     db, agent = _seam_agent(tmp_path, monkeypatch, path, archive_receipts=False)
     try:
-        original = db.get_messages_as_conversation('vertical')
+        original = conversation(db, 'vertical')
         result, _ = agent._compress_context(copy.deepcopy(original), 'Existing system prompt.',
                                             force=True)
         assert result != original, 'accepted compaction still works with the opt-in absent'
-        meta = _summary_metadata(db)
+        meta = _summary_metadata(tmp_path)
         assert meta, 'the accepted path still publishes a summary row'
         for row_meta in meta.values():
             assert archive.CARRIER_KEY not in row_meta
@@ -1001,7 +1003,7 @@ def test_commit_compaction_snapshots_receipts_config_once(tmp_path, monkeypatch)
     compaction (mint request and refresh from one decision), never via two
     independent reads that can disagree mid-commit."""
     import agent.conversation_compression as cc
-    path = tmp_path / 'seam-cfg.db'
+    path = tmp_path
     db, agent = _seam_agent(tmp_path, monkeypatch, path, archive_receipts=True)
     calls = {'n': 0}
     original_enabled = cc._archive_receipts_enabled
@@ -1011,7 +1013,7 @@ def test_commit_compaction_snapshots_receipts_config_once(tmp_path, monkeypatch)
         return original_enabled()
     monkeypatch.setattr(cc, '_archive_receipts_enabled', counting_enabled)
     try:
-        original = db.get_messages_as_conversation('vertical')
+        original = conversation(db, 'vertical')
         result, _ = agent._compress_context(copy.deepcopy(original), 'Existing system prompt.',
                                             force=True)
         assert result != original

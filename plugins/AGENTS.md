@@ -19,13 +19,12 @@ command. A hook with no concrete consumer is speculative infrastructure and is r
 - **No new in-tree memory providers (May 2026).** `plugins/memory/` is closed (byterover,
   retaindb stay until their Oct 15 2026 removal). hindsight (Sep 2026), honcho, supermemory,
   mem0, openviking and holographic (Oct 2026) moved to the plugin catalog — `plugin-catalog/<name>.yaml`, auto-installed by
-  `hermes_cli/memory_provider_migration.py` for homes still configured for them. Host-side code a
-  catalog provider still relies on (the `honcho_host_block` config storage kind, profile clone /
-  rename / update-sync hooks) resolves the provider's modules through
-  `plugins.memory.import_provider_module`, never a `plugins.memory.<name>` import. Generic seams
-  supersede that code (it is removed once the catalog provider implements them): a provider owns its profile setup through `MemoryProvider.on_profile_created` /
-  `on_profile_renamed` and its dashboard config file through `storage=STORAGE_PROVIDER` +
-  `read_config_fields` / `write_config_fields`; new provider-specific host code is refused. New
+  `hermes_cli/memory_provider_migration.py` for homes still configured for them. Core keeps no
+  provider-specific code for them: a provider owns its profile setup through
+  `MemoryProvider.on_profile_created` / `on_profile_renamed` and its dashboard config file through
+  `storage=STORAGE_PROVIDER` + `read_config_fields` / `write_config_fields`. Host-side code that
+  still needs a provider module resolves it through `plugins.memory.import_provider_module`,
+  never a `plugins.memory.<name>` import. New
   backends ship as standalone repos implementing the same `MemoryProvider` ABC, discovered through
   the same path, integrated via `hermes memory setup` / `post_setup()`.
 - **Other features that leave core** (Home Assistant platform + toolset, Oct 2026 →
@@ -185,7 +184,9 @@ count sticks. Never run it just to turn CI green.
 PR #102117 moved internals into `<stem>_<topic>` siblings. The temporary compat layer that kept the
 old import paths alive for external plugins was removed after its 2026-09-14 window; an old path now
 raises `ImportError`, surfaced as the plugin's load error in `hermes plugins list`. Plugins build on
-`ctx` and the documented ABCs. Never add re-export shims for an internal move. `hermes_cli/plugin_compat.py`
+`ctx` and the documented ABCs. Never add re-export shims for an internal move; the one exception
+is the listed turn helpers pinned catalog plugins import (plugin guide § Turn helpers kept for pinned
+catalog plugins, removed with the `hermes_state` stand-in in v0.27.0). `hermes_cli/plugin_compat.py`
 survives only as three inert stubs that already-running pre-removal updaters import.
 
 ## Tests

@@ -96,6 +96,33 @@ def collect_events(compressor, messages, *, session_id=None):
     return events or []
 
 
+def restore_owner_streams(messages, session_id):
+    """Restore typed custody only on an authenticated owner-history response.
+
+    JSON transports turn EventStream into a two-element array. Ordinary
+    ingress/model dictionaries must never call this decoder to mint authority.
+    Validate the complete response before changing any of its dictionaries.
+    """
+    restored = []
+    for message in messages:
+        if FIELD not in message:
+            continue
+        value = message[FIELD]
+        if isinstance(value, EventStream):
+            stream = value
+        elif (isinstance(value, (list, tuple)) and len(value) == 2
+              and isinstance(value[0], str) and isinstance(value[1], (list, tuple))
+              and all(isinstance(record, str) for record in value[1])):
+            stream = EventStream(value[0], tuple(value[1]))
+        else:
+            raise CompressionBudgetError('invalid owner protected event stream')
+        validate_stream(stream, session_id)
+        restored.append((message, stream))
+    for message, stream in restored:
+        message[FIELD] = stream
+    return messages
+
+
 def encode_events(events):
     if not events:
         return ''

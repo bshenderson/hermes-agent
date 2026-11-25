@@ -38,6 +38,9 @@ def _run_hermes(args: list[str], timeout: int = 30) -> subprocess.CompletedProce
     env = dict(os.environ)
     env.update(
         {
+            # Deliberate source binding prevents an installed interpreter from
+            # redirecting this isolated probe to its live owning checkout.
+            "PYTHONPATH": str(repo_root),
             "GIT_CONFIG_COUNT": "2",
             # Rewrite every https:// and ssh remote to a nonexistent local
             # path so any fetch fails in milliseconds without touching the
@@ -213,6 +216,14 @@ sys.exit(0)
                 capture_output=True,
                 text=True,
                 cwd=str(repo_root),
+                env=dict(os.environ, PYTHONPATH=str(repo_root),
+                         HTTPS_PROXY='http://127.0.0.1:9', https_proxy='http://127.0.0.1:9',
+                         NO_PROXY='', no_proxy='',
+                         GIT_CONFIG_COUNT='2',
+                         GIT_CONFIG_KEY_0='url.file:///nonexistent-hermes-test-remote/.insteadOf',
+                         GIT_CONFIG_VALUE_0='https://',
+                         GIT_CONFIG_KEY_1='url.file:///nonexistent-hermes-test-remote/.insteadOf',
+                         GIT_CONFIG_VALUE_1='git@'),
                 timeout=60,
                 check=False,
             )

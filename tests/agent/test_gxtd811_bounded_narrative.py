@@ -31,11 +31,19 @@ def test_model_pointer_is_removed_without_real_store():
     assert 'approved' not in framed
 
 
-def test_task_reference_survives_optional_clipping():
+def test_task_reference_survives_optional_clipping(tmp_path):
+    from tests._fixtures.store_support import append, create_session, open_store
     c = compressor()
     c._session_id = 'owned'
-    c._session_db = SimpleNamespace(get_latest_todo_result=lambda sid: '{"revision":1,"todos":[]}')
-    framed = frame_best_effort(c, 'routine prose ' * 10000, SourceRecords([], []), 4096)
+    with open_store(tmp_path) as store:
+        create_session(store, 'owned', profile_name='default')
+        # A real paired todo_list artifact: the assistant call that produced it, then its result.
+        append(store, 'owned', 'assistant', '', tool_calls=[{'id': 'call-1', 'type': 'function',
+               'function': {'name': 'todo_list', 'arguments': '{}'}}])
+        append(store, 'owned', 'tool', '{"revision":1,"todos":[]}',
+               tool_name='todo_list', tool_call_id='call-1')
+        c._persistence = store
+        framed = frame_best_effort(c, 'routine prose ' * 10000, SourceRecords([], []), 4096)
     assert WORK_STATE_POINTER_HEADING in framed
     assert 'grants no permissions' in framed
     assert len((framed + '\n\n' + _SUMMARY_END_MARKER).encode()) <= 4096

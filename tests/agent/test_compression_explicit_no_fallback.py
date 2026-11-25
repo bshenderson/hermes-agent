@@ -13,6 +13,16 @@ import yaml
 from agent import auxiliary_client as ac
 
 
+def _capacity_labelled(monkeypatch):
+    """The merged policy names the reason itself; force a cross-provider one for these cases."""
+    monkeypatch.setattr(ac.aux_errors, "fallback_label", lambda failure, rung_spent=False: "provider overloaded")
+
+
+def _failure() -> Any:
+    error = RuntimeError("capacity")
+    return ac.aux_errors.Failure(error=error, verdict=ac.aux_errors.classify_attempt(error, "custom:gpu0"))
+
+
 @pytest.fixture
 def compression_config(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -33,8 +43,8 @@ def test_provider_recovery_cannot_escape_empty_chain(compression_config, monkeyp
         candidate = Mock(return_value=(None, None, ""))
         monkeypatch.setattr(ac, name, candidate)
         candidates.append(candidate)
-    monkeypatch.setattr(ac, "_FALLBACK_REASONS", [(lambda error: True, "capacity")])
-    assert list(ac._ladder_provider_fallback(RuntimeError("capacity"), cast(Any, route))) == []
+    _capacity_labelled(monkeypatch)
+    assert list(ac._ladder_provider_fallback(_failure(), cast(Any, route))) == []
     for candidate in candidates:
         candidate.assert_not_called()
 
@@ -62,8 +72,8 @@ def test_missing_or_nonempty_chain_keeps_existing_recovery(compression_config, m
         monkeypatch.setattr(ac, name, Mock(return_value=(None, None, "")))
     main = Mock(return_value=(None, None, ""))
     monkeypatch.setattr(ac, "_try_main_agent_model_fallback", main)
-    monkeypatch.setattr(ac, "_FALLBACK_REASONS", [(lambda error: True, "capacity")])
-    assert list(ac._ladder_provider_fallback(RuntimeError("capacity"), cast(Any, route))) == []
+    _capacity_labelled(monkeypatch)
+    assert list(ac._ladder_provider_fallback(_failure(), cast(Any, route))) == []
     main.assert_called_once()
 
 

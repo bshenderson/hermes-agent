@@ -129,7 +129,7 @@ def test_exact_boundary_with_real_task_pointer(compressor, tmp_path, delta, glyp
     from agent.protected_events import SourceRecords
     from agent.context_compressor import _SUMMARY_END_MARKER
     from tests.agent.test_gxtd811_best_effort_compression import _append_todo_pair
-    with SessionDB(db_path=tmp_path / 'boundary.db') as db:
+    with SessionDB(db_path=tmp_path / 'state.db') as db:
         db.create_session('boundary', 'cli', profile_name='default')
         compressor.bind_session_state(session_db=db, session_id='boundary')
         if pointer:
@@ -149,7 +149,7 @@ def test_two_saturated_compactions_install_and_reopen(compressor, monkeypatch, t
     from hermes_state import SessionDB
     from tests.agent.test_gxtd811_best_effort_compression import _append_todo_pair
     from agent.compression_preservation import WORK_STATE_POINTER_HEADING
-    path = tmp_path / 'repeat.db'
+    path = tmp_path / 'state.db'
     with SessionDB(db_path=path) as db:
         db.create_session('repeat', 'cli', profile_name='default')
         compressor.bind_session_state(session_db=db, session_id='repeat')
