@@ -695,6 +695,25 @@ def discover_mcp_tools(allowed_mcp_names: Optional[list[str]] = None) -> list[st
             cookie.release()
 
 
+def activate_deferred_mcp_servers() -> list[str]:
+    """Explicit owner reload only: connect cold-deferred entries in this profile.
+
+    Keep ordinary startup/reconcile offline and honor schema TTLs. Transport/auth
+    failures are not cold deferrals and retain their existing retry owner.
+    """
+    with _owner_secret_scope():
+        servers = _config._load_mcp_config()
+    with _core._lock:
+        names = [name for name, cfg in servers.items()
+                 if mcp_server_enabled(cfg)
+                 and (key := _server_key(name)) in _core._lazy_server_configs
+                 and key not in _core._servers
+                 and key not in _core._server_connecting
+                 and _core._server_connect_errors.get(key) ==
+                 'deferred: schema cache unavailable; reconnect explicitly']
+    return [name for name in names if _ensure_lazy_server_connected(name)]
+
+
 def reconcile_mcp_servers_with_config() -> dict[str, list[str]]:
     """Bring the live server set in step with ``mcp_servers`` as it is on disk NOW: tear down
     servers that were removed from config or set ``enabled: false`` (a parked server keeps
