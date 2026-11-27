@@ -551,6 +551,14 @@ class DashboardHealth:
 DASHBOARD_HEALTH = DashboardHealth()
 
 
+def _record_dashboard_failure(request: Request, error_type: str) -> None:
+    DASHBOARD_HEALTH.record_error(error_type, request.url.path)
+    # Route templates are server-owned; raw paths, queries and exception text can
+    # carry user content or credentials and must not enter the diagnostic log.
+    route_template = getattr(request.scope.get("route"), "path", "<unmatched>")
+    _log.warning("Dashboard request failure: type=%s route=%s", error_type, route_template)
+
+
 @app.middleware("http")
 async def _dashboard_health_middleware(request: Request, call_next):
     """Outermost non-CORS middleware: count unhandled exceptions and 5xx; re-raises, never alters."""
@@ -558,13 +566,13 @@ async def _dashboard_health_middleware(request: Request, call_next):
         response = await call_next(request)
     except Exception as exc:
         from storage_user_copy import error_type_name
-        DASHBOARD_HEALTH.record_error(error_type_name(exc), request.url.path)
+        _record_dashboard_failure(request, error_type_name(exc))
         raise
     # /api/peer answers carry the gateway api_server's status (asleep, restarting, its own errors),
     # which the gateway component reports; they say nothing about this process.
     from hermes_cli.dashboard_auth.peer_pass import is_peer_path
     if response.status_code >= 500 and not is_peer_path(request.url.path):
-        DASHBOARD_HEALTH.record_error(f"http_{response.status_code}", request.url.path)
+        _record_dashboard_failure(request, f"http_{response.status_code}")
     return response
 
 

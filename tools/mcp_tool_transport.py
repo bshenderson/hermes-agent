@@ -721,7 +721,9 @@ class MCPServerTransportMixin:
             for key in owned:
                 _registration._record_tool_trust_metadata(self.name, self._config, self._tools, key)
             return
-        if not owned and not self._ready.is_set():
+        # A ready temporary probe owns no registry entries: publishing under its
+        # name would let its shutdown remove the same-named serving task's tools.
+        if not owned:
             return
         self._registered_tool_names = _registration._register_server_tools(self.name, self, self._config)
         with _core._lock:  # a retained initial-failure server that just published tools has recovered
